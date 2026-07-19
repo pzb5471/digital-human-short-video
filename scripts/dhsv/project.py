@@ -87,5 +87,5 @@ def estimate_cost(project: Mapping[str, object] | Project, duration_seconds: int
     return [video, cosy]
 
 
-def validate_paid_approval(approval: PaidApproval, provider: str, currency: str, amount: Decimal, script_sha256: str, narration_sha256: str) -> bool:
-    return approval == PaidApproval(provider, currency, amount, script_sha256, narration_sha256)
+def validate_paid_approval(approval: PaidApproval, provider: str, currency: str, amount: Decimal, script_sha256: str, narration_sha256: str, portrait_sha256: str = "") -> bool:
+    return approval == PaidApproval(provider, currency, amount, script_sha256, narration_sha256, portrait_sha256)

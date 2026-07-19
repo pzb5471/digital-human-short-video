@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -143,6 +144,21 @@ class RecordingProviderFactory:
         return self.provider
 
 
+class RemoteCreationCrash(BaseException):
+    pass
+
+
+class CrashAfterRemoteCreationProvider(RecordingProvider):
+    def __init__(self, state_path):
+        super().__init__(state_path)
+        self.intent_observed = None
+
+    def submit_video(self, request, avatar, idempotency_key):
+        self.submit_calls += 1
+        self.intent_observed = json.loads(self.state_path.read_text(encoding="utf-8"))
+        raise RemoteCreationCrash("simulated process interruption after remote creation")
+
+
 class PipelineTests(unittest.TestCase):
     def write_project(self, directory, provider="fake"):
         root = Path(directory)
@@ -216,6 +232,7 @@ class PipelineTests(unittest.TestCase):
             "amount": video["amount"],
             "script_sha256": state.script_sha256,
             "narration_sha256": state.narration_sha256,
+            "portrait_sha256": getattr(state, "portrait_sha256", ""),
         }
         payload.update(changes)
         path = Path(directory) / "paid-approval.json"
@@ -267,6 +284,19 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(estimate["requires_confirmation"])
             self.assertEqual("fake", estimate["provider"])
 
+    def test_plan_rejects_missing_portrait_before_writing_state_or_estimate(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline, _, _, _ = self.make_pipeline(directory)
+            (Path(directory) / "assets" / "portrait.png").unlink()
+            observed = None
+            try:
+                pipeline.plan()
+            except Exception as exc:
+                observed = type(exc)
+            self.assertIs(PipelineError, observed)
+            self.assertFalse((Path(directory) / "state.json").exists())
+            self.assertFalse((Path(directory) / ".runtime" / "estimate.json").exists())
+
     def test_narrate_requires_exact_script_hash_and_never_constructs_provider(self):
         with tempfile.TemporaryDirectory() as directory:
             calls = []
@@ -297,11 +327,54 @@ class PipelineTests(unittest.TestCase):
             "amount": "999.00",
             "script_sha256": "1" * 64,
             "narration_sha256": "2" * 64,
+            "portrait_sha256": "3" * 64,
         }
         for field, value in mismatches.items():
             with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
                 pipeline, _, provider, factory = self.prepare_narrated(directory)
                 approval = self.write_approval(directory, **{field: value})
+                with self.assertRaises(ApprovalError):
+                    pipeline.submit(approval)
+                self.assertEqual([], factory.calls)
+                self.assertEqual(0, provider.submit_calls)
+
+    def test_plan_and_paid_approval_bind_current_portrait_bytes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline, _, provider, factory = self.prepare_narrated(directory)
+            state = StateStore(Path(directory) / "state.json").load()
+            expected = hashlib.sha256(
+                (Path(directory) / "assets" / "portrait.png").read_bytes()
+            ).hexdigest()
+            self.assertEqual(expected, getattr(state, "portrait_sha256", None))
+            approval = self.write_approval(directory)
+            (Path(directory) / "assets" / "portrait.png").write_bytes(
+                b"tampered-portrait"
+            )
+            with self.assertRaises(ApprovalError):
+                pipeline.submit(approval)
+            self.assertEqual([], factory.calls)
+            self.assertEqual(0, provider.submit_calls)
+
+    def test_submit_rejects_project_or_estimate_tampering_before_provider_construction(self):
+        for artifact in ("project_title", "project_duration", "estimate"):
+            with self.subTest(artifact=artifact), tempfile.TemporaryDirectory() as directory:
+                pipeline, _, provider, factory = self.prepare_narrated(directory)
+                if artifact.startswith("project_"):
+                    changed = project_document()
+                    if artifact == "project_title":
+                        changed["title"] = "Changed after planning"
+                    else:
+                        changed["duration_seconds"] = 41
+                    (Path(directory) / "project.json").write_text(
+                        json.dumps(changed), encoding="utf-8"
+                    )
+                    approval = self.write_approval(directory)
+                else:
+                    estimate_path = Path(directory) / ".runtime" / "estimate.json"
+                    estimate = json.loads(estimate_path.read_text(encoding="utf-8"))
+                    estimate["lines"][0]["amount"] = "0.01"
+                    estimate_path.write_text(json.dumps(estimate), encoding="utf-8")
+                    approval = self.write_approval(directory)
                 with self.assertRaises(ApprovalError):
                     pipeline.submit(approval)
                 self.assertEqual([], factory.calls)
@@ -369,14 +442,17 @@ class PipelineTests(unittest.TestCase):
                 store = StateStore(Path(directory) / "state.json")
                 state = store.load()
                 store.save(
-                    JobState(
-                        **{
-                            **state.__dict__,
-                            "artifacts": {
-                                **state.artifacts,
-                                artifact_name: "recovered-job",
+                    replace(
+                        state,
+                        phase="submitting",
+                        artifacts={
+                            **state.artifacts,
+                            artifact_name: "recovered-job",
+                            "submission_intent": {
+                                "attempt_token": "interrupted-attempt",
+                                "stage": "video",
                             },
-                        }
+                        },
                     )
                 )
                 recovered = pipeline.submit(approval)
@@ -384,6 +460,61 @@ class PipelineTests(unittest.TestCase):
                 self.assertEqual("processing", recovered.phase)
                 self.assertEqual(0, provider.submit_calls)
                 self.assertEqual(["recovered-job"], provider.get_calls)
+                self.assertNotIn("submission_intent", recovered.artifacts)
+
+    def test_baseexception_after_remote_creation_persists_intent_and_blocks_restart(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = CrashAfterRemoteCreationProvider(
+                Path(directory) / "state.json"
+            )
+            pipeline, _, provider, factory = self.prepare_narrated(
+                directory, recording_provider=provider
+            )
+            approval = self.write_approval(directory)
+            with self.assertRaises(RemoteCreationCrash):
+                pipeline.submit(approval)
+            self.assertEqual("submitting", provider.intent_observed["phase"])
+            intent = provider.intent_observed["artifacts"]["submission_intent"]
+            self.assertTrue(intent["attempt_token"])
+            self.assertEqual("video", intent["stage"])
+            unknown = StateStore(Path(directory) / "state.json").load()
+            self.assertEqual("submission_unknown", unknown.phase)
+            self.assertEqual(intent, unknown.artifacts["submission_intent"])
+            calls_before = list(factory.calls)
+            with self.assertRaises(SubmissionUnknownError):
+                pipeline.submit(approval)
+            self.assertEqual(calls_before, factory.calls)
+            self.assertEqual(1, provider.submit_calls)
+
+    def test_stale_submission_intent_becomes_unknown_before_provider_construction(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline, _, _, factory = self.prepare_narrated(directory)
+            approval = self.write_approval(directory)
+            store = StateStore(Path(directory) / "state.json")
+            state = store.load()
+            store.save(
+                replace(
+                    state,
+                    phase="submitting",
+                    artifacts={
+                        **state.artifacts,
+                        "submission_intent": {
+                            "attempt_token": "process-died",
+                            "stage": "avatar",
+                        },
+                    },
+                )
+            )
+            observed = None
+            try:
+                pipeline.submit(approval)
+            except PipelineError as exc:
+                observed = type(exc)
+            self.assertIs(SubmissionUnknownError, observed)
+            self.assertEqual([], factory.calls)
+            self.assertEqual(
+                "submission_unknown", StateStore(Path(directory) / "state.json").load().phase
+            )
 
     def test_timeout_after_checkpoint_enters_submission_unknown_and_never_retries(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -522,6 +653,29 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual("draft", stopped.phase)
             self.assertTrue((Path(directory) / ".runtime" / "estimate.json").is_file())
             self.assertFalse((Path(directory) / ".runtime" / "audio").exists())
+
+    def test_repeated_all_with_existing_job_resumes_without_replanning_or_resubmitting(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = RecordingProvider(
+                Path(directory) / "state.json", statuses=("processing",)
+            )
+            pipeline, _, provider, _ = self.prepare_narrated(
+                directory, recording_provider=provider
+            )
+            pipeline.submit(self.write_approval(directory))
+            draft_path = Path(directory) / "script-draft.json"
+            approved_draft = draft_path.read_bytes()
+            changed_source = json.loads(json.dumps(SCRIPT_DOCUMENT))
+            changed_source["segments"][0]["spoken_text"] = "Changed source"
+            (Path(directory) / "script.json").write_text(
+                json.dumps(changed_source), encoding="utf-8"
+            )
+            resumed = pipeline.all()
+            self.assertEqual("processing", resumed.phase)
+            self.assertEqual("job-1", resumed.job_id)
+            self.assertEqual(1, provider.submit_calls)
+            self.assertEqual(["job-1"], provider.get_calls)
+            self.assertEqual(approved_draft, draft_path.read_bytes())
 
     def test_cli_exposes_exact_noninteractive_commands_and_approval_is_ignored(self):
         from run_pipeline import build_parser

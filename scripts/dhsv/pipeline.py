@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -116,6 +117,10 @@ class Pipeline:
 
     def plan(self):
         project = load_project(self.project_file, self.env)
+        if not project.portrait.is_file():
+            raise PipelineError("portrait file is missing")
+        project_sha256 = hashlib.sha256(self.project_file.read_bytes()).hexdigest()
+        portrait_sha256 = hashlib.sha256(project.portrait.read_bytes()).hexdigest()
         source = self.project_root / "script.json"
         document = json.loads(source.read_text(encoding="utf-8"))
         script = validate_script(document)
@@ -140,6 +145,8 @@ class Pipeline:
                 "script_draft_path": str(self.draft_path),
                 "estimate_path": str(self.estimate_path),
             },
+            portrait_sha256,
+            project_sha256,
         )
         self.state_store.save(state)
         return state
@@ -254,6 +261,7 @@ class Pipeline:
                 Decimal(str(document["amount"])),
                 str(document["script_sha256"]),
                 str(document["narration_sha256"]),
+                str(document["portrait_sha256"]),
             )
         except (
             OSError,
@@ -334,13 +342,39 @@ class Pipeline:
         if narration_path is None or not narration_path.is_file():
             raise ApprovalError("approved narration is missing")
         current_narration_hash = hashlib.sha256(narration_path.read_bytes()).hexdigest()
+        current_project_hash = hashlib.sha256(self.project_file.read_bytes()).hexdigest()
+        project = load_project(self.project_file, self.env)
+        if not project.portrait.is_file():
+            raise ApprovalError("approved portrait is missing")
+        current_portrait_hash = hashlib.sha256(project.portrait.read_bytes()).hexdigest()
         if (
             current_script_hash != state.script_sha256
             or current_narration_hash != state.narration_sha256
+            or current_portrait_hash != state.portrait_sha256
+            or current_project_hash != state.project_sha256
         ):
             raise ApprovalError(
-                "current script and narration bytes must match the approved SHA-256 values"
+                "current project, portrait, script, and narration bytes must match "
+                "the approved SHA-256 values"
             )
+
+    def _validated_video_cost(self, state):
+        recorded = self._video_cost()
+        project = load_project(self.project_file, self.env)
+        script = load_script(self.draft_path)
+        billed_characters = sum(len(segment.spoken_text) for segment in script.segments)
+        expected = estimate_cost(
+            project, project.duration_seconds, billed_characters
+        )[0]
+        try:
+            state_amount = Decimal(state.expected_cost)
+        except InvalidOperation as exc:
+            raise ApprovalError("state expected_cost is invalid") from exc
+        if recorded != expected or state_amount != expected.amount:
+            raise ApprovalError(
+                "current estimate must exactly match the planned project and state"
+            )
+        return recorded
 
     def _alternate_report(self, state):
         alternate = {"aliyun-me": "heygen", "heygen": "aliyun-me"}.get(
@@ -369,18 +403,54 @@ class Pipeline:
         for name in ("task_id", "video_id", "job_id"):
             value = state.artifacts.get(name)
             if value:
+                artifacts = dict(state.artifacts)
+                artifacts.pop("submission_intent", None)
                 promoted = replace(
                     state,
                     phase="submitted",
                     job_id=str(value),
                     updated_at=self._now(),
+                    artifacts=artifacts,
                 )
                 self.state_store.save(promoted)
                 return promoted
         return state
 
+    def _submission_intent(self, state, stage, attempt_token=None):
+        intent = {
+            "attempt_token": attempt_token or uuid.uuid4().hex,
+            "stage": stage,
+            "provider": state.provider,
+            "idempotency_key": state.idempotency_key,
+        }
+        submitting = replace(
+            state,
+            phase="submitting",
+            updated_at=self._now(),
+            artifacts={**state.artifacts, "submission_intent": intent},
+        )
+        self.state_store.save(submitting)
+        return submitting
+
+    def _submission_unknown(self, state):
+        unknown = replace(
+            state, phase="submission_unknown", updated_at=self._now()
+        )
+        self.state_store.save(unknown)
+        return unknown
+
+    def _recover_interrupted_submission(self, state):
+        recovered = self._promote_checkpointed_job(state)
+        if recovered.job_id is not None:
+            return recovered
+        if recovered.phase == "submitting" or recovered.artifacts.get(
+            "submission_intent"
+        ):
+            return self._submission_unknown(recovered)
+        return recovered
+
     def submit(self, approval_file):
-        state = self._promote_checkpointed_job(self.state_store.load())
+        state = self._recover_interrupted_submission(self.state_store.load())
         if state.phase == "submission_unknown":
             raise SubmissionUnknownError(
                 "submission status is unknown; recover the original provider ID manually"
@@ -398,7 +468,7 @@ class Pipeline:
         if state.phase != "narrated":
             raise PipelineError("submit requires narrated state")
         self._validate_current_hashes(state)
-        cost = self._video_cost()
+        cost = self._validated_video_cost(state)
         approval = self._read_approval(approval_file)
         if not validate_paid_approval(
             approval,
@@ -407,6 +477,7 @@ class Pipeline:
             cost.amount,
             state.script_sha256,
             state.narration_sha256,
+            state.portrait_sha256,
         ):
             raise ApprovalError(
                 "paid approval must exactly match provider, currency, amount, "
@@ -418,35 +489,42 @@ class Pipeline:
         if not capability.available:
             return self._mark_failed_and_report(state_box[0])
         request = self._request(project, state)
+        state_box[0] = self._submission_intent(state_box[0], "avatar")
+        attempt_token = state_box[0].artifacts["submission_intent"]["attempt_token"]
         try:
             avatar = provider.create_or_reuse_avatar(request, state_box[0])
+            state_box[0] = self._submission_intent(
+                state_box[0], "video", attempt_token
+            )
             job = provider.submit_video(
                 request, avatar, state_box[0].idempotency_key
             )
-        except (TimeoutError, requests.exceptions.Timeout) as exc:
+        except BaseException as exc:
             recovered = self._promote_checkpointed_job(state_box[0])
             if recovered.job_id is not None:
-                return recovered
-            unknown = replace(
-                state_box[0], phase="submission_unknown", updated_at=self._now()
-            )
-            self.state_store.save(unknown)
-            raise SubmissionUnknownError(
-                "provider mutation timed out; submission is quarantined for manual recovery"
-            ) from exc
-        except ProviderValidationError:
-            return self._mark_failed_and_report(state_box[0])
+                if isinstance(exc, (TimeoutError, requests.exceptions.Timeout)):
+                    return recovered
+                raise
+            self._submission_unknown(recovered)
+            if isinstance(exc, (TimeoutError, requests.exceptions.Timeout)):
+                raise SubmissionUnknownError(
+                    "provider mutation timed out; submission is quarantined for manual recovery"
+                ) from exc
+            raise
+        artifacts = dict(state_box[0].artifacts)
+        artifacts.pop("submission_intent", None)
         submitted = replace(
             state_box[0],
             phase="submitted",
             job_id=job.job_id,
             updated_at=self._now(),
+            artifacts=artifacts,
         )
         self.state_store.save(submitted)
         return submitted
 
     def resume(self):
-        state = self._promote_checkpointed_job(self.state_store.load())
+        state = self._recover_interrupted_submission(self.state_store.load())
         if state.phase in {"downloaded", "composed", "verified"}:
             return state
         if state.phase == "submission_unknown":
@@ -563,10 +641,33 @@ class Pipeline:
         return verified
 
     def all(self, *, script_approval=None, approval_file=None):
-        planned = self.plan()
+        if not self.state_store.path.is_file():
+            state = self.plan()
+        else:
+            state = self.state_store.load()
+        checkpointed_job = any(
+            state.artifacts.get(name) for name in ("task_id", "video_id", "job_id")
+        )
+        if (
+            state.job_id is not None
+            or checkpointed_job
+            or state.phase in {"submitting", "submission_unknown"}
+        ):
+            return self.resume()
+        if state.phase in {"downloaded", "composed", "verified"}:
+            return state
+        if state.phase == "failed":
+            raise PipelineError("failed state requires an explicit recovery decision")
+        if state.phase in {"draft", "approved"}:
+            if approval_file is None:
+                return state
+            if not script_approval:
+                raise ApprovalError(
+                    "all requires --script-approval before narration"
+                )
+            state = self.narrate(script_approval)
+        if state.phase != "narrated":
+            raise PipelineError(f"all cannot continue from phase {state.phase}")
         if approval_file is None:
-            return planned
-        if not script_approval:
-            raise ApprovalError("all requires --script-approval when approval is provided")
-        self.narrate(script_approval)
+            return state
         return self.submit(approval_file)

@@ -3,7 +3,7 @@ from decimal import Decimal
 from typing import Literal
 
 ProviderName = Literal["auto", "aliyun-me", "heygen", "fake"]
-JobPhase = Literal["draft", "approved", "narrated", "submitted", "submission_unknown", "processing", "completed", "downloaded", "composed", "verified", "failed"]
+JobPhase = Literal["draft", "approved", "narrated", "submitting", "submitted", "submission_unknown", "processing", "completed", "downloaded", "composed", "verified", "failed"]
 
 
 @dataclass(frozen=True)
@@ -21,6 +21,7 @@ class PaidApproval:
     amount: Decimal
     script_sha256: str
     narration_sha256: str
+    portrait_sha256: str = ""
 
 
 @dataclass(frozen=True)
@@ -36,3 +37,5 @@ class JobState:
     created_at: str
     updated_at: str
     artifacts: dict[str, object] = field(default_factory=dict)
+    portrait_sha256: str = ""
+    project_sha256: str = ""
