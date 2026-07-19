@@ -218,8 +218,14 @@ class Pipeline:
     def _provider(self, provider_name, checkpoint_sink):
         if self.provider_factory is not None:
             return self.provider_factory(provider_name, checkpoint_sink)
+        provider_capability_name = {
+            "aliyun-me": "ALIYUN_ME_WATERMARK_FREE_CONFIRMED",
+            "heygen": "HEYGEN_WATERMARK_FREE_CONFIRMED",
+        }.get(provider_name)
         watermark_free_confirmed = str(
-            self.env.get("DHSV_WATERMARK_FREE_CONFIRMED", "")
+            self.env.get(provider_capability_name, "")
+            if provider_capability_name and provider_capability_name in self.env
+            else self.env.get("DHSV_WATERMARK_FREE_CONFIRMED", "")
         ).strip().lower() in {"1", "true", "yes", "on"}
         if provider_name == "fake":
             from .providers.fake import FakeProvider
