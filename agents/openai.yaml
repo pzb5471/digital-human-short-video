@@ -1,0 +1,8 @@
+interface:
+  display_name: "数字人口播短视频"
+  short_description: "使用已授权人像和云端API生成无平台水印数字人口播短视频"
+  brand_color: "#1677FF"
+  default_prompt: "使用 $digital-human-short-video 将已授权人像和口播主题制作成无水印竖屏短视频，并在付费 API 调用前先估算成本和确认。"
+
+policy:
+  allow_implicit_invocation: true

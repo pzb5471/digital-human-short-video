@@ -12,3 +12,5 @@
 **/*.wav
 **/*.mp4
 **/*.webm
+**/*.png
+!assets/*.png
