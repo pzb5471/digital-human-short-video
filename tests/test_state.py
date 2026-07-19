@@ -39,3 +39,16 @@ class StateContractTests(unittest.TestCase):
         self.assertNotIn("abc.def.ghi", clean)
         self.assertNotIn("Signature=secret", clean)
         self.assertIn("[REDACTED]", clean)
+
+    def test_redact_masks_full_provider_key_names_with_equals_and_colons(self):
+        secrets = {
+            "HEYGEN_API_KEY": "heygen-production-secret",
+            "ALIBABA_CLOUD_ACCESS_KEY_ID": "aliyun-access-key-id",
+            "ALIBABA_CLOUD_ACCESS_KEY_SECRET": "aliyun-access-key-secret",
+            "X-Api-Key": "header-api-key-secret",
+        }
+        text = " ".join(f"{name}{':' if name in {'HEYGEN_API_KEY', 'X-Api-Key'} else '='}{secret}" for name, secret in secrets.items())
+        clean = redact(text)
+        for secret in secrets.values():
+            self.assertNotIn(secret, clean)
+        self.assertEqual(4, clean.count("[REDACTED]"))
