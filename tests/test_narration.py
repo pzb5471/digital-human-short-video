@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from dhsv.narration import NarrationPipeline, NarrationValidationError
+from dhsv.narration import NarrationError, NarrationPipeline, NarrationValidationError
 from dhsv.media import FFmpegMedia
 from dhsv.script import Script, Segment, validate_script
 
@@ -66,6 +66,13 @@ class NarrationTests(unittest.TestCase):
             NarrationPipeline(Client(), PerSegmentMedia(), Path(directory)).build(script())
             revision = __import__("json").loads((Path(directory) / "audio" / "revision_required.json").read_text())
             self.assertEqual(["hook"], revision["segment_ids"])
+
+    def test_merged_audio_over_58_seconds_fails_after_probe(self):
+        class LongFinalMedia(Media):
+            def duration_ms(self, path): return 59000 if Path(path).name == "narration.wav" else 400
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(NarrationError):
+                NarrationPipeline(Client(), LongFinalMedia(), Path(directory)).build(script())
 
     def test_over_58_seconds_fails_before_client(self):
         over = Script((Segment("hook", "hook", "你" * 300, "你", 0, ()), Segment("cta", "cta", "好", "好", 0, ())))

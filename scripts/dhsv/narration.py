@@ -8,6 +8,7 @@ from .script import estimate_duration_ms
 
 
 class NarrationValidationError(ValueError): pass
+class NarrationError(RuntimeError): pass
 
 @dataclass(frozen=True)
 class NarrationResult:
@@ -32,6 +33,8 @@ class NarrationPipeline:
         output = audio_dir / "narration.wav"; self.media.concat_and_normalize(inputs, output)
         digest = hashlib.sha256(output.read_bytes()).hexdigest(); hash_path = audio_dir / "narration.wav.sha256"; temporary = hash_path.with_suffix(".tmp"); temporary.write_text(digest + "\n"); os.replace(temporary, hash_path)
         expected = estimate_duration_ms(script); actual = self.media.duration_ms(output)
+        if actual > 58000:
+            raise NarrationError("merged narration exceeds 58 seconds")
         affected = []
         for segment in script.segments:
             segment_expected = max(1, len(segment.spoken_text)) * 200
