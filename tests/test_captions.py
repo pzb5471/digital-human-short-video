@@ -5,7 +5,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from dhsv.captions import build_captions, render_ass, render_srt, wrap_caption_lines
+from dhsv.captions import CaptionValidationError, build_captions, render_ass, render_srt, wrap_caption_lines
 from dhsv.script import load_script
 
 
@@ -34,12 +34,27 @@ class CaptionContractTests(unittest.TestCase):
         self.assertEqual(1300, first["words"][-1]["end_ms"])
         self.assertTrue(all(a["end_ms"] <= b["start_ms"] for a, b in zip(first["words"], first["words"][1:])))
 
+    def test_supplied_segment_start_before_prior_pause_offset_fails(self):
+        timestamps = {"segments": [{"id": "hook", "start_ms": 0, "end_ms": 1300}, {"id": "cta", "start_ms": 1400, "end_ms": 2400}]}
+        with self.assertRaises(CaptionValidationError):
+            build_captions(self.script, timestamps)
+
+    def test_fallback_marks_every_token_in_multicharacter_cjk_keyword_span(self):
+        timestamps = {"segments": [{"id": "hook", "start_ms": 0, "end_ms": 1300}, {"id": "cta", "start_ms": 1600, "end_ms": 2400}]}
+        first = build_captions(self.script, timestamps)["cues"][0]
+        highlighted = [word["text"] for word in first["words"] if word["highlight"]]
+        self.assertEqual(["重", "复", "处", "理"], highlighted)
+
     def test_lines_wrap_to_two_lines_without_splitting_ascii_words_or_numbers(self):
         lines = wrap_caption_lines("这是用于验证换行的中文文本 OpenAI 2026 继续阅读")
         self.assertLessEqual(len(lines), 2)
         self.assertTrue(all(len(line) <= 16 for line in lines))
         self.assertTrue(any("OpenAI" in line for line in lines))
         self.assertTrue(any("2026" in line for line in lines))
+
+    def test_overwide_unbreakable_ascii_word_is_rejected(self):
+        with self.assertRaises(CaptionValidationError):
+            wrap_caption_lines("this_ascii_token_is_wider_than_sixteen_cells")
 
     def test_srt_ass_and_json_contracts(self):
         captions = build_captions(self.script, self.timestamps)

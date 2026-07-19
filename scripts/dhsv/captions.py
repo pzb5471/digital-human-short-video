@@ -4,6 +4,10 @@ from pathlib import Path
 from .script import Script
 
 
+class CaptionValidationError(ValueError):
+    pass
+
+
 def _is_cjk(character: str) -> bool:
     return "\u4e00" <= character <= "\u9fff"
 
@@ -13,11 +17,16 @@ def _display_weight(token: str) -> float:
 
 
 def _tokens(text: str) -> list[str]:
-    return re.findall(r"[A-Za-z0-9]+|[\u4e00-\u9fff]|[^\s]", text)
+    return [match.group() for match in _token_spans(text)]
+
+
+def _token_spans(text: str) -> list[re.Match]:
+    return list(re.finditer(r"[A-Za-z0-9]+|[\u4e00-\u9fff]|[^\s]", text))
 
 
 def _fallback_words(text: str, start_ms: int, end_ms: int, keywords: tuple[str, ...]) -> list[dict]:
-    tokens = _tokens(text)
+    spans = _token_spans(text)
+    tokens = [match.group() for match in spans]
     weights = [_display_weight(token) for token in tokens]
     total = sum(weights) or 1
     cursor = start_ms
@@ -25,7 +34,10 @@ def _fallback_words(text: str, start_ms: int, end_ms: int, keywords: tuple[str, 
     for index, (token, weight) in enumerate(zip(tokens, weights)):
         next_cursor = end_ms if index == len(tokens) - 1 else cursor + round((end_ms - start_ms) * weight / total)
         next_cursor = max(cursor, min(end_ms, next_cursor))
-        words.append({"text": token, "start_ms": cursor, "end_ms": next_cursor, "highlight": any(keyword in token for keyword in keywords)})
+        token_span = (spans[index].start(), spans[index].end())
+        keyword_spans = [(match.start(), match.end()) for keyword in keywords for match in re.finditer(re.escape(keyword), text)]
+        highlighted = any(token_span[0] < end and start < token_span[1] for start, end in keyword_spans)
+        words.append({"text": token, "start_ms": cursor, "end_ms": next_cursor, "highlight": highlighted})
         cursor = next_cursor
     return words
 
@@ -35,6 +47,8 @@ def wrap_caption_lines(text: str) -> list[str]:
     lines, current, weight = [], "", 0.0
     for token in tokens:
         token_weight = _display_weight(token)
+        if token_weight > 16:
+            raise CaptionValidationError("an unbreakable caption token exceeds 16 display cells")
         if current and weight + token_weight > 16:
             lines.append(current)
             current, weight = "", 0.0
@@ -43,7 +57,7 @@ def wrap_caption_lines(text: str) -> list[str]:
     if current:
         lines.append(current)
     if len(lines) > 2:
-        raise ValueError("caption exceeds two lines")
+        raise CaptionValidationError("caption exceeds two lines")
     return lines
 
 
@@ -55,8 +69,10 @@ def build_captions(script: Script, timestamps: dict) -> dict:
         stream = streams.get(segment.id, {})
         start = int(stream.get("start_ms", offset))
         end = int(stream.get("end_ms", start + max(1, len(segment.spoken_text)) * 200))
+        if start < offset:
+            raise CaptionValidationError("segment start precedes the prior segment pause offset")
         if end < start:
-            raise ValueError("segment timestamps must be monotonic")
+            raise CaptionValidationError("segment timestamps must be monotonic")
         supplied = stream.get("words")
         if supplied:
             words = []
@@ -64,7 +80,7 @@ def build_captions(script: Script, timestamps: dict) -> dict:
             for word in supplied:
                 word_start, word_end = int(word["start_ms"]), int(word["end_ms"])
                 if word_start < previous or word_end < word_start or word_start < start or word_end > end:
-                    raise ValueError("word timestamps must be monotonic within segment")
+                    raise CaptionValidationError("word timestamps must be monotonic within segment")
                 text = str(word["text"])
                 words.append({"text": text, "start_ms": word_start, "end_ms": word_end, "highlight": any(keyword in text for keyword in segment.keywords)})
                 previous = word_end
