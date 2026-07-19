@@ -487,6 +487,20 @@ class Pipeline:
         project = load_project(self.project_file, self.env)
         provider = self._provider(state.provider, checkpoint_sink)
         capability = provider.validate_credentials()
+        capability_state = replace(
+            state_box[0],
+            updated_at=self._now(),
+            artifacts={
+                **state_box[0].artifacts,
+                "provider_capability": {
+                    "checked": True,
+                    "provider": state.provider,
+                    "watermark_free_confirmed": capability.available,
+                },
+            },
+        )
+        self.state_store.save(capability_state)
+        state_box[0] = capability_state
         if not capability.available:
             return self._mark_failed_and_report(state_box[0])
         request = self._request(project, state)
@@ -599,20 +613,38 @@ class Pipeline:
         if destination == original.resolve():
             raise CompositionError("composition output must not overwrite provider original")
         try:
-            self.composer(original, destination, state)
+            composition_result = self.composer(original, destination, state)
         except Exception as exc:
             raise CompositionError(f"composition failed: {exc}") from exc
         if not destination.is_file():
             raise CompositionError("composer did not create the configured output")
+        artifacts = {
+            **state.artifacts,
+            "composed_path": str(destination),
+            "composed_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+        }
+        if (
+            isinstance(composition_result, dict)
+            and isinstance(
+                composition_result.get("watermark_layers_omitted"), bool
+            )
+            and isinstance(
+                composition_result.get("watermark_removal_postprocessing"), bool
+            )
+        ):
+            artifacts["composition_policy"] = {
+                "watermark_layers_omitted": composition_result[
+                    "watermark_layers_omitted"
+                ],
+                "watermark_removal_postprocessing": composition_result[
+                    "watermark_removal_postprocessing"
+                ],
+            }
         composed = replace(
             state,
             phase="composed",
             updated_at=self._now(),
-            artifacts={
-                **state.artifacts,
-                "composed_path": str(destination),
-                "composed_sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
-            },
+            artifacts=artifacts,
         )
         self.state_store.save(composed)
         return composed

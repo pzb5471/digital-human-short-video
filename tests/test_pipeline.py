@@ -665,6 +665,10 @@ class PipelineTests(unittest.TestCase):
                 calls.append(("compose", Path(original)))
                 Path(destination).parent.mkdir(parents=True, exist_ok=True)
                 Path(destination).write_bytes(b"composed")
+                return {
+                    "watermark_layers_omitted": True,
+                    "watermark_removal_postprocessing": False,
+                }
 
             def failing_verifier(output, state):
                 calls.append(("verify", Path(output)))
@@ -680,6 +684,13 @@ class PipelineTests(unittest.TestCase):
             pipeline.resume()
             composed = pipeline.compose()
             self.assertEqual("composed", composed.phase)
+            self.assertEqual(
+                {
+                    "watermark_layers_omitted": True,
+                    "watermark_removal_postprocessing": False,
+                },
+                composed.artifacts["composition_policy"],
+            )
             with self.assertRaises(VerificationError):
                 pipeline.verify()
             self.assertEqual(
