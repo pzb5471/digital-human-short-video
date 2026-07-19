@@ -1,0 +1,8 @@
+{
+  "project_id": "example-short-video",
+  "rights_confirmed": true,
+  "portrait": "assets/authorized-portrait.png",
+  "duration_seconds": 40,
+  "aspect_ratio": "9:16",
+  "provider": "fake"
+}
