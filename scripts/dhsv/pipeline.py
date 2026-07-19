@@ -482,7 +482,7 @@ class Pipeline:
         ):
             raise ApprovalError(
                 "paid approval must exactly match provider, currency, amount, "
-                "script SHA-256, and narration SHA-256"
+                "script SHA-256, narration SHA-256, and portrait SHA-256"
             )
         project = load_project(self.project_file, self.env)
         provider = self._provider(state.provider, checkpoint_sink)

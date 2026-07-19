@@ -388,7 +388,7 @@ class PipelineTests(unittest.TestCase):
             with self.subTest(field=field), tempfile.TemporaryDirectory() as directory:
                 pipeline, _, provider, factory = self.prepare_narrated(directory)
                 approval = self.write_approval(directory, **{field: value})
-                with self.assertRaises(ApprovalError):
+                with self.assertRaisesRegex(ApprovalError, "portrait SHA-256"):
                     pipeline.submit(approval)
                 self.assertEqual([], factory.calls)
                 self.assertEqual(0, provider.submit_calls)
