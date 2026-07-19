@@ -1,14 +1,76 @@
 from decimal import Decimal
-from .base import *
+from pathlib import Path
+
+from .base import (
+    AvatarRef,
+    CapabilityReport,
+    DownloadedAsset,
+    ProviderStatus,
+    ProviderValidationError,
+    SubmittedJob,
+    validate_final_audio,
+)
+from ..models import CostLine
+
+
 class FakeProvider:
- name="fake"
- def __init__(self,watermark_free_confirmed=False): self.watermark_free_confirmed=watermark_free_confirmed; self.jobs={}
- def validate_credentials(self): return CapabilityReport(self.watermark_free_confirmed,"watermark-free capability unconfirmed" if not self.watermark_free_confirmed else "")
- def estimate_cost(self,r): return CostLine("Fake","CNY",Decimal("0"),"test")
- def create_or_reuse_avatar(self,r,s): return AvatarRef("fake-avatar")
- def submit_video(self,r,a,idempotency_key):
-  validate_final_audio(r)
-  if not self.validate_credentials().available: raise ProviderValidationError("watermark-free capability unconfirmed")
-  self.jobs.setdefault(idempotency_key,SubmittedJob("fake-"+idempotency_key)); return self.jobs[idempotency_key]
- def get_status(self,j): return ProviderStatus("completed")
- def download_result(self,j,d): return DownloadedAsset(d)
+    name = "fake"
+
+    def __init__(
+        self,
+        watermark_free_confirmed: bool = False,
+        *,
+        status_sequence=("queued", "processing", "completed"),
+        result_bytes: bytes = b"fake-video",
+    ):
+        if not status_sequence:
+            raise ValueError("status_sequence must not be empty")
+        self.watermark_free_confirmed = watermark_free_confirmed
+        self.status_sequence = tuple(status_sequence)
+        self.result_bytes = result_bytes
+        self.jobs: dict[str, SubmittedJob] = {}
+        self._job_state: dict[str, dict] = {}
+
+    def validate_credentials(self):
+        return CapabilityReport(
+            self.watermark_free_confirmed,
+            "" if self.watermark_free_confirmed else "watermark-free capability unconfirmed",
+        )
+
+    def estimate_cost(self, request):
+        return CostLine("Fake", "CNY", Decimal("0"), "local deterministic fake")
+
+    def create_or_reuse_avatar(self, request, state):
+        return AvatarRef("fake-avatar")
+
+    def submit_video(self, request, avatar, idempotency_key):
+        if idempotency_key in self.jobs:
+            return self.jobs[idempotency_key]
+        validate_final_audio(request)
+        if not self.validate_credentials().available:
+            raise ProviderValidationError("watermark-free capability unconfirmed")
+        job = SubmittedJob(f"fake-{idempotency_key}")
+        self.jobs[idempotency_key] = job
+        self._job_state[job.job_id] = {"index": 0, "last_status": None}
+        return job
+
+    def get_status(self, job_id):
+        if job_id not in self._job_state:
+            raise ProviderValidationError(f"unknown fake job: {job_id}")
+        job = self._job_state[job_id]
+        index = min(job["index"], len(self.status_sequence) - 1)
+        status = self.status_sequence[index]
+        job["last_status"] = status
+        if job["index"] < len(self.status_sequence) - 1:
+            job["index"] += 1
+        return ProviderStatus(status)
+
+    def download_result(self, job_id, destination):
+        if job_id not in self._job_state:
+            raise ProviderValidationError(f"unknown fake job: {job_id}")
+        if self._job_state[job_id]["last_status"] != "completed":
+            raise ProviderValidationError("fake job is not completed")
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(self.result_bytes)
+        return DownloadedAsset(destination)
