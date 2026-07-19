@@ -21,6 +21,13 @@ def prepare_remotion(project_file,out_dir):
   if target.name in used: raise PreparationError("asset filename collision")
   used.add(target.name); shutil.copy2(source,target); return f"project/{target.name}"
  props={"primaryVideo":copy("provider_original"),"logo":copy("logo"),"brandBackground":copy("brand_background"),"bgm":copy("bgm"),"hook":doc.get("hook",""),"cta":doc.get("cta",""),"broll":[],"captions":doc.get("captions",[])}
+ for cue in props["captions"]:
+  lines=cue.get("lines",[])[:2]; line_index=0; cursor=0
+  for word in cue.get("words",[]):
+   if word.get("line") in (0,1): continue
+   text=str(word.get("text","")); found=lines[line_index].find(text,cursor) if line_index<len(lines) else -1
+   if found<0 and line_index+1<len(lines): line_index+=1; cursor=0; found=lines[line_index].find(text,cursor)
+   word["line"]=min(line_index,1); cursor=(found+len(text)) if found>=0 else cursor
  for item in doc.get("broll",[]):
   source=_owned(root,item["path"]); target=out/source.name
   if target.name in used: raise PreparationError("asset filename collision")

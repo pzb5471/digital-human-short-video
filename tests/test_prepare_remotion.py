@@ -64,6 +64,21 @@ class PrepareRemotionTests(unittest.TestCase):
         self.assertIn("calculateMetadata",root)
         self.assertIn("volume={(frame)=>",video)
         self.assertIn("objectFit:'cover'",video)
+        self.assertIn("zIndex:0",video)
+        self.assertIn("zIndex:1",video)
+        package=(template.parent/"package.json").read_text(encoding="utf-8")
+        self.assertIn("verify-render.mjs",package)
         fixtures=(template/"fixtures.ts").read_text(encoding="utf-8")
         self.assertIn("captions",fixtures)
         self.assertIn("broll",fixtures)
+        captions=(template/"Captions.tsx").read_text(encoding="utf-8")
+        self.assertIn("visualLines",captions)
+        self.assertNotIn("<div>{cue.words.map",captions)
+
+    def test_prepare_maps_multiple_words_to_at_most_two_visual_lines(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root=Path(directory); (root/"primary.mp4").write_bytes(b"video")
+            cue={"start_ms":0,"end_ms":1000,"lines":["第一行文本","第二行文本"],"words":[{"text":"第一行","start_ms":0,"end_ms":400,"highlight":True},{"text":"文本","start_ms":400,"end_ms":500,"highlight":False},{"text":"第二行","start_ms":500,"end_ms":800,"highlight":True},{"text":"文本","start_ms":800,"end_ms":1000,"highlight":False}]}
+            project=root/"project.json";project.write_text(json.dumps({"provider_original":"primary.mp4","captions":[cue]}),encoding="utf-8")
+            props=prepare_remotion(project,root/"template"/"public"/"project")
+            self.assertEqual([0,0,1,1],[word["line"] for word in props["captions"][0]["words"]])
