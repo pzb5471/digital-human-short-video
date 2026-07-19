@@ -4,6 +4,7 @@ from pathlib import Path
 from .base import (
     AvatarRef,
     CapabilityReport,
+    CheckpointState,
     DownloadedAsset,
     ProviderStatus,
     ProviderValidationError,
@@ -22,6 +23,7 @@ class FakeProvider:
         *,
         status_sequence=("queued", "processing", "completed"),
         result_bytes: bytes = b"fake-video",
+        checkpoint_sink=None,
     ):
         if not status_sequence:
             raise ValueError("status_sequence must not be empty")
@@ -30,6 +32,15 @@ class FakeProvider:
         self.result_bytes = result_bytes
         self.jobs: dict[str, SubmittedJob] = {}
         self._job_state: dict[str, dict] = {}
+        self._checkpoints = CheckpointState(checkpoint_sink)
+
+    @property
+    def checkpoint_state(self):
+        return self._checkpoints.state
+
+    @property
+    def state_artifacts(self):
+        return self.checkpoint_state
 
     def validate_credentials(self):
         return CapabilityReport(
@@ -41,6 +52,7 @@ class FakeProvider:
         return CostLine("Fake", "CNY", Decimal("0"), "local deterministic fake")
 
     def create_or_reuse_avatar(self, request, state):
+        self._checkpoints.record(avatar_id="fake-avatar")
         return AvatarRef("fake-avatar")
 
     def submit_video(self, request, avatar, idempotency_key):
@@ -52,6 +64,7 @@ class FakeProvider:
         job = SubmittedJob(f"fake-{idempotency_key}")
         self.jobs[idempotency_key] = job
         self._job_state[job.job_id] = {"index": 0, "last_status": None}
+        self._checkpoints.record(task_id=job.job_id)
         return job
 
     def get_status(self, job_id):
@@ -63,6 +76,7 @@ class FakeProvider:
         job["last_status"] = status
         if job["index"] < len(self.status_sequence) - 1:
             job["index"] += 1
+        self._checkpoints.record(task_id=job_id, status=status)
         return ProviderStatus(status)
 
     def download_result(self, job_id, destination):

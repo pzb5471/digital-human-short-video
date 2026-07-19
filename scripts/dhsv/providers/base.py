@@ -1,4 +1,5 @@
 import hashlib
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -8,6 +9,58 @@ from ..models import CostLine, JobState
 
 class ProviderValidationError(ValueError):
     pass
+
+
+def _validate_checkpoint_artifact(value, path="checkpoint"):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            normalized = str(key).lower()
+            if any(
+                forbidden in normalized
+                for forbidden in (
+                    "access_key",
+                    "credential",
+                    "secret",
+                    "signature",
+                    "signed_url",
+                    "token",
+                )
+            ):
+                raise ProviderValidationError(
+                    f"unsafe checkpoint field is forbidden: {path}.{key}"
+                )
+            _validate_checkpoint_artifact(child, f"{path}.{key}")
+        return
+    if isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _validate_checkpoint_artifact(child, f"{path}[{index}]")
+        return
+    if not isinstance(value, (str, int, float, bool, type(None))):
+        raise ProviderValidationError(f"checkpoint value is not serializable: {path}")
+    if isinstance(value, str) and ("://" in value or "?" in value):
+        raise ProviderValidationError(f"URLs are forbidden in checkpoint state: {path}")
+
+
+class CheckpointState:
+    """Immediately exposes safe recovery artifacts and optionally persists snapshots."""
+
+    def __init__(self, sink=None):
+        self._state: dict[str, object] = {}
+        self._sink = sink
+
+    @property
+    def state(self) -> dict[str, object]:
+        return deepcopy(self._state)
+
+    def record(self, **artifacts) -> dict[str, object]:
+        candidate = deepcopy(self._state)
+        candidate.update(deepcopy(artifacts))
+        _validate_checkpoint_artifact(candidate)
+        self._state = candidate
+        snapshot = self.state
+        if self._sink is not None:
+            self._sink(snapshot)
+        return snapshot
 
 
 @dataclass(frozen=True)

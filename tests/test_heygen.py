@@ -33,12 +33,15 @@ class FakeResponse:
 
 
 class FakeSession:
-    def __init__(self, *, posts=None, gets=None):
+    def __init__(self, *, posts=None, gets=None, events=None):
         self.post_responses = list(posts or [])
         self.get_responses = list(gets or [])
         self.calls = []
+        self.events = events
 
     def post(self, url, **kwargs):
+        if self.events is not None:
+            self.events.append(("post", url))
         captured = dict(kwargs)
         if "files" in captured:
             filename, handle, content_type = captured["files"]["file"]
@@ -182,6 +185,33 @@ class HeyGenProviderTests(unittest.TestCase):
         self.assertEqual("idem", submit[2]["headers"]["Idempotency-Key"])
         self.assertEqual("audio-asset", provider.state_artifacts["audio_asset_id"])
         self.assertEqual("video-1", provider.state_artifacts["video_id"])
+
+    def test_audio_asset_id_is_checkpointed_before_video_submit_failure(self):
+        events = []
+        session = FakeSession(
+            posts=[response("audio-asset"), FakeResponse(status_code=500)], events=events
+        )
+        provider = HeyGenProvider(
+            env(HEYGEN_AVATAR_ID="avatar-cached"),
+            watermark_free_confirmed=True,
+            session=session,
+            checkpoint_sink=lambda snapshot: events.append(("checkpoint", snapshot)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            request = self.request(directory)
+            avatar = provider.create_or_reuse_avatar(request, state())
+            with self.assertRaisesRegex(ProviderValidationError, "video submission"):
+                provider.submit_video(request, avatar, "idem")
+        audio_checkpoint = next(
+            event
+            for event in events
+            if event[0] == "checkpoint" and "audio_asset_id" in event[1]
+        )
+        video_post = ("post", "https://api.heygen.com/v3/videos")
+        self.assertLess(events.index(audio_checkpoint), events.index(video_post))
+        self.assertEqual("audio-asset", provider.checkpoint_state["audio_asset_id"])
+        self.assertNotIn("video_url", provider.checkpoint_state)
+        self.assertNotIn("heygen-key", repr(provider.checkpoint_state))
 
     def test_hash_and_watermark_failures_happen_before_http_mutations(self):
         with tempfile.TemporaryDirectory() as directory:

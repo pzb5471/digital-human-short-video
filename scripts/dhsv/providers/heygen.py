@@ -9,6 +9,7 @@ import requests
 from .base import (
     AvatarRef,
     CapabilityReport,
+    CheckpointState,
     DownloadedAsset,
     ProviderStatus,
     ProviderValidationError,
@@ -66,16 +67,25 @@ class HeyGenProvider:
         *,
         avatar_cache=None,
         base_url=DEFAULT_BASE_URL,
+        checkpoint_sink=None,
     ):
         self.env = dict(env)
         self.watermark_free_confirmed = watermark_free_confirmed
         self.session = session or requests.Session()
         self.avatar_cache = avatar_cache if avatar_cache is not None else {}
         self.base_url = base_url.rstrip("/")
-        self.state_artifacts: dict[str, object] = {}
+        self._checkpoints = CheckpointState(checkpoint_sink)
         self._avatar_modes: dict[str, str] = {}
         self._submitted: dict[str, SubmittedJob] = {}
         self._result_urls: dict[str, str] = {}
+
+    @property
+    def checkpoint_state(self):
+        return self._checkpoints.state
+
+    @property
+    def state_artifacts(self):
+        return self.checkpoint_state
 
     def validate_credentials(self):
         if not self.env.get("HEYGEN_API_KEY"):
@@ -141,7 +151,7 @@ class HeyGenProvider:
         if configured:
             avatar_id = str(configured)
             self._avatar_modes[avatar_id] = "avatar"
-            self.state_artifacts["avatar_id"] = avatar_id
+            self._checkpoints.record(avatar_id=avatar_id)
             return AvatarRef(avatar_id)
         if not request.portrait_path.is_file():
             raise ProviderValidationError("portrait file is missing")
@@ -149,14 +159,14 @@ class HeyGenProvider:
         cached = self.avatar_cache.get(portrait_hash)
         if cached:
             self._avatar_modes[cached] = "avatar"
-            self.state_artifacts["avatar_id"] = cached
+            self._checkpoints.record(avatar_id=cached)
             return AvatarRef(cached)
         portrait_asset_id = self._upload_asset(
             request.portrait_path,
             f"portrait:{request.project_id}:{portrait_hash}",
             "portrait",
         )
-        self.state_artifacts["portrait_asset_id"] = portrait_asset_id
+        self._checkpoints.record(portrait_asset_id=portrait_asset_id)
         image_fallback = str(self.env.get("HEYGEN_IMAGE_FALLBACK", "")).lower() in {
             "1",
             "true",
@@ -165,7 +175,7 @@ class HeyGenProvider:
         }
         if image_fallback:
             self._avatar_modes[portrait_asset_id] = "image"
-            self.state_artifacts["avatar_mode"] = "image"
+            self._checkpoints.record(avatar_mode="image")
             return AvatarRef(portrait_asset_id)
         data = self._post(
             "/v3/photo_avatars",
@@ -176,7 +186,7 @@ class HeyGenProvider:
         avatar_id = _identifier(data, "id", "avatar_id")
         self.avatar_cache[portrait_hash] = avatar_id
         self._avatar_modes[avatar_id] = "avatar"
-        self.state_artifacts["avatar_id"] = avatar_id
+        self._checkpoints.record(avatar_id=avatar_id)
         return AvatarRef(avatar_id)
 
     def submit_video(self, request, avatar, idempotency_key):
@@ -187,6 +197,7 @@ class HeyGenProvider:
         audio_asset_id = self._upload_asset(
             request.narration_path, f"{idempotency_key}:audio", "audio"
         )
+        self._checkpoints.record(audio_asset_id=audio_asset_id)
         mode = self._avatar_modes.get(avatar.id, "avatar")
         payload = {
             "type": mode,
@@ -210,8 +221,7 @@ class HeyGenProvider:
         video_id = _identifier(data, "id", "video_id")
         job = SubmittedJob(video_id)
         self._submitted[idempotency_key] = job
-        self.state_artifacts["audio_asset_id"] = audio_asset_id
-        self.state_artifacts["video_id"] = video_id
+        self._checkpoints.record(video_id=video_id)
         return job
 
     def get_status(self, job_id):

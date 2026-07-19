@@ -69,6 +69,28 @@ class FakeAliyunClient:
         return aliyun_models.GetProjectTaskResponse(body=body)
 
 
+class FailingCreateClient(FakeAliyunClient):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def create_anchor(self, request):
+        self.create_requests.append(request)
+        self.events.append("create_anchor")
+        raise RuntimeError("injected CreateAnchor failure")
+
+
+class FailingSubmitClient(FakeAliyunClient):
+    def __init__(self, events):
+        super().__init__()
+        self.events = events
+
+    def submit_project_task(self, request):
+        self.submit_requests.append(request)
+        self.events.append("submit_project_task")
+        raise RuntimeError("injected SubmitProjectTask failure")
+
+
 class StubPublisher:
     def __init__(self):
         self.calls = []
@@ -227,6 +249,21 @@ class AliyunMEProviderTests(unittest.TestCase):
         )
         self.assertNotIn("Signature", repr(provider.state_artifacts))
 
+    def test_portrait_object_key_is_checkpointed_before_create_anchor_failure(self):
+        events = []
+        provider, _, _ = self.provider(
+            client=FailingCreateClient(events),
+            checkpoint_sink=lambda snapshot: events.append(("checkpoint", snapshot)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "CreateAnchor"):
+                provider.create_or_reuse_avatar(self.request(directory), state())
+        self.assertEqual("checkpoint", events[0][0])
+        self.assertEqual("demo/random-portrait.png", events[0][1]["portrait"]["object_key"])
+        self.assertEqual("create_anchor", events[1])
+        self.assertEqual(events[0][1], provider.checkpoint_state)
+        self.assertNotIn("Signature", repr(provider.checkpoint_state))
+
     def test_insufficient_resource_seconds_stops_before_upload_or_submit(self):
         publisher = StubPublisher()
         provider, client, _ = self.provider(
@@ -268,6 +305,23 @@ class AliyunMEProviderTests(unittest.TestCase):
             {"object_key": "demo/random-narration.wav"},
             provider.state_artifacts["audio"],
         )
+
+    def test_audio_object_key_is_checkpointed_before_submit_project_task_failure(self):
+        events = []
+        provider, _, _ = self.provider(
+            client=FailingSubmitClient(events),
+            checkpoint_sink=lambda snapshot: events.append(("checkpoint", snapshot)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RuntimeError, "SubmitProjectTask"):
+                provider.submit_video(self.request(directory), AvatarRef("anchor"), "idem")
+        checkpoint = next(event for event in events if isinstance(event, tuple))
+        self.assertEqual(
+            "demo/random-narration.wav", checkpoint[1]["audio"]["object_key"]
+        )
+        self.assertLess(events.index(checkpoint), events.index("submit_project_task"))
+        self.assertEqual(checkpoint[1], provider.checkpoint_state)
+        self.assertNotIn("Signature", repr(provider.checkpoint_state))
 
     def test_audio_hash_mismatch_stops_before_any_sdk_or_oss_mutation(self):
         publisher = StubPublisher()

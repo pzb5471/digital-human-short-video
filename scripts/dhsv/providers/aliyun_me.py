@@ -10,6 +10,7 @@ from alibabacloud_tea_openapi import models as open_api_models
 from .base import (
     AvatarRef,
     CapabilityReport,
+    CheckpointState,
     DownloadedAsset,
     ProviderStatus,
     ProviderValidationError,
@@ -59,6 +60,7 @@ class AliyunMEProvider:
         portrait_anchor_map=None,
         download_session=None,
         endpoint=DEFAULT_ENDPOINT,
+        checkpoint_sink=None,
     ):
         self.env = dict(env)
         self.watermark_free_confirmed = watermark_free_confirmed
@@ -69,10 +71,18 @@ class AliyunMEProvider:
         )
         self.download_session = download_session or requests.Session()
         self.endpoint = endpoint
-        self.state_artifacts: dict[str, object] = {}
+        self._checkpoints = CheckpointState(checkpoint_sink)
         self._client_instance = None
         self._submitted: dict[str, SubmittedJob] = {}
         self._result_urls: dict[str, str] = {}
+
+    @property
+    def checkpoint_state(self):
+        return self._checkpoints.state
+
+    @property
+    def state_artifacts(self):
+        return self.checkpoint_state
 
     def validate_credentials(self):
         missing = [name for name in REQUIRED_ENV if not self.env.get(name)]
@@ -126,9 +136,10 @@ class AliyunMEProvider:
         portrait_hash = hashlib.sha256(request.portrait_path.read_bytes()).hexdigest()
         cached = self.portrait_anchor_map.get(portrait_hash)
         if cached:
-            self.state_artifacts["anchor_id"] = cached
+            self._checkpoints.record(anchor_id=cached)
             return AvatarRef(cached)
         portrait = self._publisher().publish(request.project_id, request.portrait_path)
+        self._checkpoints.record(portrait=portrait.public_state)
         create_request = aliyun_models.CreateAnchorRequest().from_map(
             {
                 "anchorMaterialName": f"{request.project_id}-{portrait_hash[:12]}",
@@ -142,8 +153,7 @@ class AliyunMEProvider:
             raise ProviderValidationError("Aliyun CreateAnchor did not return an anchor ID")
         anchor_id = str(body.data)
         self.portrait_anchor_map[portrait_hash] = anchor_id
-        self.state_artifacts["portrait"] = portrait.public_state
-        self.state_artifacts["anchor_id"] = anchor_id
+        self._checkpoints.record(anchor_id=anchor_id)
         return AvatarRef(anchor_id)
 
     def _check_resource_seconds(self, duration_seconds, idempotency_key):
@@ -174,6 +184,7 @@ class AliyunMEProvider:
             raise ProviderValidationError("duration_seconds must be positive")
         self._check_resource_seconds(request.duration_seconds, idempotency_key)
         audio = self._publisher().publish(request.project_id, request.narration_path)
+        self._checkpoints.record(audio=audio.public_state)
         payload = {
             "scaleType": "9:16",
             "subtitleTag": 0,
@@ -199,8 +210,7 @@ class AliyunMEProvider:
             raise ProviderValidationError("Aliyun SubmitProjectTask did not return taskId")
         job = SubmittedJob(str(task_id))
         self._submitted[idempotency_key] = job
-        self.state_artifacts["audio"] = audio.public_state
-        self.state_artifacts["task_id"] = job.job_id
+        self._checkpoints.record(task_id=job.job_id)
         return job
 
     def get_status(self, job_id):
