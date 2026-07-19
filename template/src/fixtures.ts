@@ -1,1 +1,1 @@
-export const empty=[];
+import type {Props} from './types';export const fixture:Props={primaryVideo:'project/original.mp4',logo:'project/logo.png',brandBackground:'project/background.png',bgm:'project/bgm.wav',hook:'测试开场',cta:'立即了解',durationInFrames:120,broll:[{src:'project/product.png',from:30,durationInFrames:45}],captions:[{start_ms:500,end_ms:2400,lines:['真实字幕测试'],words:[{text:'真实',start_ms:500,end_ms:1200,highlight:true},{text:'字幕测试',start_ms:1200,end_ms:2400,highlight:false}]}]};
