@@ -17,7 +17,9 @@ class StateStore:
         os.replace(temporary, self.path)
 
     def load(self) -> JobState:
-        return JobState(**json.loads(self.path.read_text(encoding="utf-8")))
+        document = json.loads(self.path.read_text(encoding="utf-8"))
+        document.setdefault("artifacts", {})
+        return JobState(**document)
 
 
 def is_submit_ready(state: JobState) -> bool:

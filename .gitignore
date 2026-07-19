@@ -9,6 +9,7 @@
 **/out/
 **/.runtime/
 **/state.json
+**/paid-approval.json
 **/*.wav
 **/*.mp4
 **/*.webm

@@ -1,9 +1,9 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal
 
 ProviderName = Literal["auto", "aliyun-me", "heygen", "fake"]
-JobPhase = Literal["draft", "approved", "narrated", "submitted", "processing", "completed", "downloaded", "composed", "verified", "failed"]
+JobPhase = Literal["draft", "approved", "narrated", "submitted", "submission_unknown", "processing", "completed", "downloaded", "composed", "verified", "failed"]
 
 
 @dataclass(frozen=True)
@@ -35,3 +35,4 @@ class JobState:
     expected_cost: str
     created_at: str
     updated_at: str
+    artifacts: dict[str, object] = field(default_factory=dict)
