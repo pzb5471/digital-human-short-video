@@ -1,0 +1,53 @@
+import hashlib
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from dhsv.narration import NarrationPipeline, NarrationValidationError
+from dhsv.media import FFmpegMedia
+from dhsv.script import Script, Segment, validate_script
+
+
+def script():
+    return validate_script({"segments":[
+        {"id":"hook","role":"hook","spoken_text":"你好","subtitle_text":"你好","pause_after_ms":100,"keywords":[]},
+        {"id":"cta","role":"cta","spoken_text":"再见","subtitle_text":"再见","pause_after_ms":0,"keywords":[]},
+    ]})
+
+class Client:
+    def __init__(self): self.calls=[]
+    def synthesize(self, text, **kwargs): self.calls.append((text, kwargs)); return type("R", (), {"audio": text.encode(), "words": [{"text": text}]})()
+
+class Media:
+    def __init__(self): self.calls=[]
+    def concat_and_normalize(self, inputs, output): self.calls.append(inputs); Path(output).write_bytes(b"narration")
+    def duration_ms(self, path): return 1000
+
+class NarrationTests(unittest.TestCase):
+    def test_ffmpeg_concat_includes_pause_silence_and_loudnorm(self):
+        commands = []
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "out.wav"
+            FFmpegMedia(lambda command, **kwargs: commands.append(command)).concat_and_normalize([(Path("one.wav"), 250), (Path("two.wav"), 0)], output)
+        joined = " ".join(commands[0])
+        self.assertIn("anullsrc", joined)
+        self.assertIn("concat=n=3", joined)
+        self.assertIn("loudnorm=I=-16:TP=-1:LRA=11", joined)
+    def test_segments_cache_media_concat_hash_and_revision_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client, media = Client(), Media()
+            result = NarrationPipeline(client, media, Path(directory)).build(script())
+            self.assertEqual(2, len(client.calls))
+            self.assertEqual(2, len(media.calls[0]))
+            self.assertEqual(hashlib.sha256(Path(result.narration_path).read_bytes()).hexdigest(), Path(result.hash_path).read_text().strip())
+            NarrationPipeline(client, media, Path(directory)).build(script())
+            self.assertEqual(2, len(client.calls))
+
+    def test_over_58_seconds_fails_before_client(self):
+        over = Script((Segment("hook", "hook", "你" * 300, "你", 0, ()), Segment("cta", "cta", "好", "好", 0, ())))
+        with tempfile.TemporaryDirectory() as directory:
+            client = Client()
+            with self.assertRaises(NarrationValidationError): NarrationPipeline(client, Media(), Path(directory)).build(over)
+            self.assertEqual([], client.calls)
