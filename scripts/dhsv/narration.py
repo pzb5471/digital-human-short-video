@@ -25,13 +25,19 @@ class NarrationPipeline:
         for segment in script.segments:
             key = hashlib.sha256(f"cosyvoice-v3.5-flash|longanyang|{rate}|{segment.spoken_text}|{seed}".encode()).hexdigest()
             path = segments_dir / f"{segment.id}.wav"; words_path = timestamps_dir / f"{segment.id}.json"; key_path = segments_dir / f"{segment.id}.cache-key"
-            if not path.exists() or not key_path.exists() or key_path.read_text(encoding="utf-8") != key:
+            if not path.exists() or not words_path.exists() or not key_path.exists() or key_path.read_text(encoding="utf-8") != key:
                 result = self.client.synthesize(segment.spoken_text, rate=rate, seed=seed)
                 path.write_bytes(result.audio); words_path.write_text(json.dumps(result.words, ensure_ascii=False), encoding="utf-8"); key_path.write_text(key, encoding="utf-8")
             inputs.append((path, segment.pause_after_ms))
         output = audio_dir / "narration.wav"; self.media.concat_and_normalize(inputs, output)
         digest = hashlib.sha256(output.read_bytes()).hexdigest(); hash_path = audio_dir / "narration.wav.sha256"; temporary = hash_path.with_suffix(".tmp"); temporary.write_text(digest + "\n"); os.replace(temporary, hash_path)
         expected = estimate_duration_ms(script); actual = self.media.duration_ms(output)
-        if expected and abs(actual - expected) / expected > .08:
-            (audio_dir / "revision_required.json").write_text(json.dumps({"segment_ids": [segment.id for segment in script.segments]}), encoding="utf-8")
+        affected = []
+        for segment in script.segments:
+            segment_expected = max(1, len(segment.spoken_text)) * 200
+            segment_actual = self.media.duration_ms(segments_dir / f"{segment.id}.wav")
+            if abs(segment_actual - segment_expected) / segment_expected > .08:
+                affected.append(segment.id)
+        if expected and abs(actual - expected) / expected > .08 and affected:
+            (audio_dir / "revision_required.json").write_text(json.dumps({"segment_ids": affected}), encoding="utf-8")
         return NarrationResult(output, hash_path)
