@@ -24,7 +24,29 @@ def _token_spans(text: str) -> list[re.Match]:
     return list(re.finditer(r"[A-Za-z0-9]+|[\u4e00-\u9fff]|[^\s]", text))
 
 
-def _fallback_words(text: str, start_ms: int, end_ms: int, keywords: tuple[str, ...]) -> list[dict]:
+def _keyword_spans(text: str, keywords: tuple[str, ...]) -> list[tuple[int, int]]:
+    return [(match.start(), match.end()) for keyword in keywords for match in re.finditer(re.escape(keyword), text)]
+
+
+def _overlaps_keyword(span: tuple[int, int] | None, keyword_spans: list[tuple[int, int]]) -> bool:
+    return span is not None and any(span[0] < end and start < span[1] for start, end in keyword_spans)
+
+
+def _source_spans(text: str, words: list[str]) -> list[tuple[int, int] | None]:
+    cursor = 0
+    spans = []
+    for word in words:
+        start = text.find(word, cursor)
+        if start < 0:
+            spans.append(None)
+            continue
+        end = start + len(word)
+        spans.append((start, end))
+        cursor = end
+    return spans
+
+
+def _fallback_words(text: str, start_ms: int, end_ms: int, keyword_spans: list[tuple[int, int]]) -> list[dict]:
     spans = _token_spans(text)
     tokens = [match.group() for match in spans]
     weights = [_display_weight(token) for token in tokens]
@@ -35,8 +57,7 @@ def _fallback_words(text: str, start_ms: int, end_ms: int, keywords: tuple[str, 
         next_cursor = end_ms if index == len(tokens) - 1 else cursor + round((end_ms - start_ms) * weight / total)
         next_cursor = max(cursor, min(end_ms, next_cursor))
         token_span = (spans[index].start(), spans[index].end())
-        keyword_spans = [(match.start(), match.end()) for keyword in keywords for match in re.finditer(re.escape(keyword), text)]
-        highlighted = any(token_span[0] < end and start < token_span[1] for start, end in keyword_spans)
+        highlighted = _overlaps_keyword(token_span, keyword_spans)
         words.append({"text": token, "start_ms": cursor, "end_ms": next_cursor, "highlight": highlighted})
         cursor = next_cursor
     return words
@@ -73,19 +94,22 @@ def build_captions(script: Script, timestamps: dict) -> dict:
             raise CaptionValidationError("segment start precedes the prior segment pause offset")
         if end < start:
             raise CaptionValidationError("segment timestamps must be monotonic")
+        keyword_spans = _keyword_spans(segment.spoken_text, segment.keywords)
         supplied = stream.get("words")
         if supplied:
             words = []
             previous = start
-            for word in supplied:
+            supplied_text = [str(word["text"]) for word in supplied]
+            source_spans = _source_spans(segment.spoken_text, supplied_text)
+            for word, source_span in zip(supplied, source_spans):
                 word_start, word_end = int(word["start_ms"]), int(word["end_ms"])
                 if word_start < previous or word_end < word_start or word_start < start or word_end > end:
                     raise CaptionValidationError("word timestamps must be monotonic within segment")
                 text = str(word["text"])
-                words.append({"text": text, "start_ms": word_start, "end_ms": word_end, "highlight": any(keyword in text for keyword in segment.keywords)})
+                words.append({"text": text, "start_ms": word_start, "end_ms": word_end, "highlight": _overlaps_keyword(source_span, keyword_spans)})
                 previous = word_end
         else:
-            words = _fallback_words(segment.spoken_text, start, end, segment.keywords)
+            words = _fallback_words(segment.spoken_text, start, end, keyword_spans)
         cues.append({"id": f"{segment.role}-{index:03d}", "start_ms": start, "end_ms": end, "lines": wrap_caption_lines(segment.subtitle_text), "words": words})
         offset = end + segment.pause_after_ms
     duration = max((cue["end_ms"] for cue in cues), default=0)

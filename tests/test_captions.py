@@ -45,6 +45,15 @@ class CaptionContractTests(unittest.TestCase):
         highlighted = [word["text"] for word in first["words"] if word["highlight"]]
         self.assertEqual(["重", "复", "处", "理"], highlighted)
 
+    def test_supplied_words_split_across_keyword_are_all_highlighted(self):
+        timestamps = {"segments": [
+            {"id": "hook", "start_ms": 0, "end_ms": 1300, "words": [{"text": "还在", "start_ms": 0, "end_ms": 260}, {"text": "重复", "start_ms": 260, "end_ms": 700}, {"text": "处理", "start_ms": 700, "end_ms": 900}, {"text": "同样的工作吗", "start_ms": 900, "end_ms": 1300}]},
+            {"id": "cta", "start_ms": 1600, "end_ms": 2400},
+        ]}
+        first = build_captions(self.script, timestamps)["cues"][0]
+        highlighted = [word["text"] for word in first["words"] if word["highlight"]]
+        self.assertEqual(["重复", "处理"], highlighted)
+
     def test_lines_wrap_to_two_lines_without_splitting_ascii_words_or_numbers(self):
         lines = wrap_caption_lines("这是用于验证换行的中文文本 OpenAI 2026 继续阅读")
         self.assertLessEqual(len(lines), 2)
