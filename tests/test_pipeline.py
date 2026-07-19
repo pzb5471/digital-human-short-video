@@ -92,6 +92,7 @@ class RecordingProvider:
         self.checkpoint_sink = None
         self.avatar_calls = 0
         self.submit_calls = 0
+        self.idempotency_keys = []
         self.get_calls = []
         self.download_calls = []
         self.events = []
@@ -110,6 +111,7 @@ class RecordingProvider:
 
     def submit_video(self, request, avatar, idempotency_key):
         self.submit_calls += 1
+        self.idempotency_keys.append(idempotency_key)
         self.checkpoint_sink({"audio_asset_id": "audio-1"})
         self.checkpoint_observed_during_submit = json.loads(
             self.state_path.read_text(encoding="utf-8")
@@ -319,6 +321,59 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue((Path(directory) / ".runtime" / "audio" / "narration.wav").is_file())
             for name in ("captions.json", "captions.srt", "captions.ass"):
                 self.assertTrue((Path(directory) / ".runtime" / name).is_file())
+
+    def test_narration_idempotency_key_changes_when_portrait_changes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline, _, _, _ = self.make_pipeline(directory)
+            planned = pipeline.plan()
+            first = pipeline.narrate(planned.script_sha256)
+
+            (Path(directory) / "assets" / "portrait.png").write_bytes(
+                b"replacement-portrait"
+            )
+            replanned = pipeline.plan()
+            second = pipeline.narrate(replanned.script_sha256)
+
+            self.assertNotEqual(first.portrait_sha256, second.portrait_sha256)
+            self.assertNotEqual(first.idempotency_key, second.idempotency_key)
+
+    def test_narration_idempotency_key_changes_when_project_semantics_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pipeline, _, _, _ = self.make_pipeline(directory)
+            planned = pipeline.plan()
+            first = pipeline.narrate(planned.script_sha256)
+
+            changed = project_document()
+            changed["title"] = "A semantically different project"
+            (Path(directory) / "project.json").write_text(
+                json.dumps(changed), encoding="utf-8"
+            )
+            replanned = pipeline.plan()
+            second = pipeline.narrate(replanned.script_sha256)
+
+            self.assertNotEqual(first.project_sha256, second.project_sha256)
+            self.assertNotEqual(first.idempotency_key, second.idempotency_key)
+
+    def test_same_approved_inputs_keep_key_and_never_resubmit_for_each_provider(self):
+        for provider_name in ("fake", "aliyun-me", "heygen"):
+            with self.subTest(
+                provider=provider_name
+            ), tempfile.TemporaryDirectory() as directory:
+                pipeline, _, provider, _ = self.make_pipeline(
+                    directory, provider=provider_name
+                )
+                planned = pipeline.plan()
+                first = pipeline.narrate(planned.script_sha256)
+                replanned = pipeline.plan()
+                second = pipeline.narrate(replanned.script_sha256)
+                self.assertEqual(first.idempotency_key, second.idempotency_key)
+
+                approval = self.write_approval(directory)
+                pipeline.submit(approval)
+                pipeline.submit(approval)
+
+                self.assertEqual(1, provider.submit_calls)
+                self.assertEqual([second.idempotency_key], provider.idempotency_keys)
 
     def test_submit_rejects_each_paid_approval_mismatch_before_provider_construction(self):
         mismatches = {

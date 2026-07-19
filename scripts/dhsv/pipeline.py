@@ -192,7 +192,8 @@ class Pipeline:
         self._atomic_write_text(captions_ass, render_ass(captions))
         idempotency_key = hashlib.sha256(
             (
-                f"{state.project_id}:{state.provider}:{state.script_sha256}:"
+                f"{state.project_id}:{state.provider}:{state.project_sha256}:"
+                f"{state.portrait_sha256}:{state.script_sha256}:"
                 f"{narration_sha256}"
             ).encode("utf-8")
         ).hexdigest()
