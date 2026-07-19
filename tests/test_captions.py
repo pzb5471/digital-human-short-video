@@ -1,0 +1,52 @@
+import json
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+
+from dhsv.captions import build_captions, render_ass, render_srt, wrap_caption_lines
+from dhsv.script import load_script
+
+
+class CaptionContractTests(unittest.TestCase):
+    def setUp(self):
+        fixture = Path(__file__).parent / "fixtures"
+        self.script = load_script(fixture / "script.json")
+        self.timestamps = json.loads((fixture / "timestamps.json").read_text(encoding="utf-8"))
+
+    def test_word_timestamps_are_monotonic_and_segment_offsets_include_pause(self):
+        captions = build_captions(self.script, self.timestamps)
+        cues = captions["cues"]
+        self.assertEqual(0, cues[0]["start_ms"])
+        self.assertLessEqual(cues[0]["end_ms"], cues[1]["start_ms"])
+        for cue in cues:
+            words = cue["words"]
+            self.assertEqual(sorted(words, key=lambda word: word["start_ms"]), words)
+            self.assertTrue(all(word["start_ms"] <= word["end_ms"] for word in words))
+
+    def test_missing_word_stream_uses_weighted_fallback_and_exact_boundaries(self):
+        timestamps = {"segments": [{"id": "hook", "start_ms": 0, "end_ms": 1300}, {"id": "cta", "start_ms": 1600, "end_ms": 2400}]}
+        captions = build_captions(self.script, timestamps)
+        first = captions["cues"][0]
+        self.assertEqual((0, 1300), (first["start_ms"], first["end_ms"]))
+        self.assertEqual(0, first["words"][0]["start_ms"])
+        self.assertEqual(1300, first["words"][-1]["end_ms"])
+        self.assertTrue(all(a["end_ms"] <= b["start_ms"] for a, b in zip(first["words"], first["words"][1:])))
+
+    def test_lines_wrap_to_two_lines_without_splitting_ascii_words_or_numbers(self):
+        lines = wrap_caption_lines("这是用于验证换行的中文文本 OpenAI 2026 继续阅读")
+        self.assertLessEqual(len(lines), 2)
+        self.assertTrue(all(len(line) <= 16 for line in lines))
+        self.assertTrue(any("OpenAI" in line for line in lines))
+        self.assertTrue(any("2026" in line for line in lines))
+
+    def test_srt_ass_and_json_contracts(self):
+        captions = build_captions(self.script, self.timestamps)
+        self.assertEqual(1, captions["version"])
+        self.assertIn("duration_ms", captions)
+        self.assertTrue(any(word["highlight"] for word in captions["cues"][0]["words"]))
+        self.assertRegex(render_srt(captions), r"\d\d:\d\d:\d\d,\d{3}")
+        ass = render_ass({"version": 1, "duration_ms": 1000, "cues": [{"id": "x", "start_ms": 0, "end_ms": 1000, "lines": ["a{b}"], "words": []}]})
+        self.assertIn("MarginV=180", ass)
+        self.assertIn(r"a\{b\}", ass)
