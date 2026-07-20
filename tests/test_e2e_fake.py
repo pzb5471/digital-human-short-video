@@ -91,7 +91,7 @@ class FakeEndToEndTests(unittest.TestCase):
             manifest_path = project_root / ".runtime" / "verification-manifest.json"
             report_dir = project_root / ".runtime" / "verification"
 
-            def composer(original, destination, state):
+            def render_composition(original, destination, state):
                 captions = json.loads(
                     Path(state.artifacts["captions_json_path"]).read_text(
                         encoding="utf-8"
@@ -130,6 +130,12 @@ class FakeEndToEndTests(unittest.TestCase):
                     "watermark_removal_postprocessing": False,
                 }
 
+            def composer(original, destination, state):
+                try:
+                    return render_composition(original, destination, state)
+                finally:
+                    tracked_props.write_bytes(original_props)
+
             def verifier(output, state):
                 verify_module.write_verification_manifest(state, manifest_path)
                 report = verify_module.verify_video(
@@ -151,73 +157,70 @@ class FakeEndToEndTests(unittest.TestCase):
                 composer=composer,
                 verifier=verifier,
             )
-            try:
-                planned = pipeline.plan()
-                narrated = pipeline.narrate(planned.script_sha256)
-                estimate = json.loads(
-                    (project_root / ".runtime" / "estimate.json").read_text(
-                        encoding="utf-8"
-                    )
-                )["lines"][0]
-                approval = project_root / "paid-approval.json"
-                approval.write_text(
-                    json.dumps(
-                        {
-                            "provider": "fake",
-                            "currency": estimate["currency"],
-                            "amount": estimate["amount"],
-                            "script_sha256": narrated.script_sha256,
-                            "narration_sha256": narrated.narration_sha256,
-                            "portrait_sha256": narrated.portrait_sha256,
-                        }
-                    ),
-                    encoding="utf-8",
+            planned = pipeline.plan()
+            narrated = pipeline.narrate(planned.script_sha256)
+            estimate = json.loads(
+                (project_root / ".runtime" / "estimate.json").read_text(
+                    encoding="utf-8"
                 )
-                submitted = pipeline.submit(approval)
-                self.assertEqual("submitted", submitted.phase)
-                downloaded = pipeline.resume()
-                self.assertEqual("downloaded", downloaded.phase)
-                self.assertEqual(submitted.job_id, downloaded.job_id)
-                self.assertTrue(
-                    Path(downloaded.artifacts["provider_original_path"]).is_file()
-                )
-                composed = pipeline.compose()
-                self.assertEqual("composed", composed.phase)
-                verified = pipeline.verify()
-                self.assertEqual("verified", verified.phase)
-                resumed = pipeline.resume()
-                self.assertEqual("verified", resumed.phase)
-                self.assertEqual(1, len(provider.jobs))
-
-                final_state = StateStore(project_root / "state.json").load()
-                capability = final_state.artifacts["provider_capability"]
-                self.assertTrue(capability["checked"])
-                self.assertTrue(capability["watermark_free_confirmed"])
-                self.assertIn("provider_original_sha256", final_state.artifacts)
-                self.assertIn("composed_sha256", final_state.artifacts)
-                self.assertEqual(
+            )["lines"][0]
+            approval = project_root / "paid-approval.json"
+            approval.write_text(
+                json.dumps(
                     {
-                        "watermark_layers_omitted": True,
-                        "watermark_removal_postprocessing": False,
-                    },
-                    final_state.artifacts["composition_policy"],
-                )
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                self.assertEqual("fake", manifest["provider"])
-                self.assertTrue(
-                    manifest["provider_capability"]["watermark_free_confirmed"]
-                )
-                self.assertFalse(manifest["watermark_review"]["automated_cv_claim"])
-                self.assertTrue(
-                    manifest["watermark_review"]["contact_sheet_visual_review_required"]
-                )
-                report = json.loads(
-                    (report_dir / "verification.json").read_text(encoding="utf-8")
-                )
-                self.assertTrue(report["passed"])
-                self.assertTrue(Path(report["contact_sheet_path"]).is_file())
-            finally:
-                tracked_props.write_bytes(original_props)
+                        "provider": "fake",
+                        "currency": estimate["currency"],
+                        "amount": estimate["amount"],
+                        "script_sha256": narrated.script_sha256,
+                        "narration_sha256": narrated.narration_sha256,
+                        "portrait_sha256": narrated.portrait_sha256,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            submitted = pipeline.submit(approval)
+            self.assertEqual("submitted", submitted.phase)
+            downloaded = pipeline.resume()
+            self.assertEqual("downloaded", downloaded.phase)
+            self.assertEqual(submitted.job_id, downloaded.job_id)
+            self.assertTrue(
+                Path(downloaded.artifacts["provider_original_path"]).is_file()
+            )
+            composed = pipeline.compose()
+            self.assertEqual("composed", composed.phase)
+            verified = pipeline.verify()
+            self.assertEqual("verified", verified.phase)
+            resumed = pipeline.resume()
+            self.assertEqual("verified", resumed.phase)
+            self.assertEqual(1, len(provider.jobs))
+
+            final_state = StateStore(project_root / "state.json").load()
+            capability = final_state.artifacts["provider_capability"]
+            self.assertTrue(capability["checked"])
+            self.assertTrue(capability["watermark_free_confirmed"])
+            self.assertIn("provider_original_sha256", final_state.artifacts)
+            self.assertIn("composed_sha256", final_state.artifacts)
+            self.assertEqual(
+                {
+                    "watermark_layers_omitted": True,
+                    "watermark_removal_postprocessing": False,
+                },
+                final_state.artifacts["composition_policy"],
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual("fake", manifest["provider"])
+            self.assertTrue(
+                manifest["provider_capability"]["watermark_free_confirmed"]
+            )
+            self.assertFalse(manifest["watermark_review"]["automated_cv_claim"])
+            self.assertTrue(
+                manifest["watermark_review"]["contact_sheet_visual_review_required"]
+            )
+            report = json.loads(
+                (report_dir / "verification.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(report["passed"])
+            self.assertTrue(Path(report["contact_sheet_path"]).is_file())
 
 
 if __name__ == "__main__":

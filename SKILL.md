@@ -26,13 +26,13 @@ Create `project.json` beside every relative asset path. Resolve paths from that 
   "portrait": "assets/portrait.png",
   "duration_seconds": 40,
   "aspect_ratio": "9:16",
-  "provider": "auto",
+  "provider": "aliyun-me",
   "title": "Product launch",
   "output": "out/final.mp4"
 }
 ```
 
-Use `provider: auto` to select Aliyun only when its AK, SK, OSS endpoint, and bucket are available; otherwise select HeyGen only when `HEYGEN_API_KEY` is available. Use `fake` only for local tests.
+Use `provider: aliyun-me` for the safe default. Never create or recommend a project with `provider: auto`: compatibility code can resolve `auto`, but automatic provider selection is outside this skill's approval workflow. Use `fake` only for local tests. Treat `title` and `output` as raw project-document composition metadata; they are not fields of the immutable `Project` dataclass.
 
 ## 3. Generate and approve the script
 
@@ -42,9 +42,11 @@ Show the complete script and initial duration estimate. Run `plan`, then ask the
 
 ## 4. Plan cost and paid approval
 
-Prefer Aliyun for the economic default. Use HeyGen only as an explicit fallback after reporting a new estimate and receiving a new approval.
+Prefer Aliyun for the economic default. Switch to HeyGen only after the user explicitly chooses that fallback: edit `project.json` to `provider: heygen`, rerun `plan`, show the new provider, currency, and amount, and obtain a new paid approval. Never reuse an Aliyun approval.
 
-Treat the implementation baselines—Aliyun `6 CNY/min`, HeyGen `0.05 USD/sec`, and the separately displayed CosyVoice billed-character line—as configurable estimates, not live quotes. Check current official pricing before payment, update the deployment's rate configuration, rerun `plan`, and use its serialized estimate. Never silently substitute a web price after approval.
+Treat the implementation baselines as estimates, not live quotes. Before payment, check current official pricing and set `DHSV_ALIYUN_CNY_PER_MINUTE` (default `6`), `DHSV_HEYGEN_USD_PER_SECOND` (default `0.05`), and `DHSV_COSYVOICE_CNY_PER_1000_CHARACTERS` (default `0`) to finite, non-negative decimal rates. Rerun `plan` and use its serialized estimate; changed or invalid rates invalidate or block approval. Never silently substitute a web price after approval.
+
+Do not autonomously recharge an account, buy credits, start or change a subscription, enable auto-reload, or upgrade a provider plan. Each account purchase or plan change requires separate, explicit user authorization; approval of one video-generation estimate does not authorize it.
 
 Require a paid approval file whose tuple exactly matches the current state:
 
@@ -66,7 +68,7 @@ Treat `.runtime/audio/narration.wav` and `narration.wav.sha256` as the audio sou
 
 Use Aliyun Marketing Engine by default. Publish the portrait and narration to the user's OSS bucket, retain only object keys in state, and use 24-hour signed HTTPS URLs transiently. Require sufficient `SelectResource` seconds. Reuse a portrait-hash anchor mapping; create an anchor only when no mapping exists.
 
-Use HeyGen only after an explicit fallback decision. Upload the same portrait and narration, prefer a cached avatar, and use explicit image fallback only when configured. Send idempotency keys on every mutation.
+Use HeyGen only after the explicit fallback decision and re-approval sequence above. Upload the same portrait and narration, prefer `HEYGEN_AVATAR_ID` or a cached avatar, and enable image fallback only when the user explicitly sets `HEYGEN_IMAGE_FALLBACK=true`; empty, `false`, and other values leave image fallback disabled. Send idempotency keys on every mutation.
 
 Persist asset IDs, avatar/anchor IDs, task/video ID, and submission intent before polling. Poll only GET status endpoints. Never automatically repeat a mutation after a timeout or ambiguous 429. Quarantine the state as `submission_unknown` until the original provider ID is recovered.
 

@@ -74,16 +74,65 @@ def load_project(project_file: str | Path, env: Mapping[str, str] | None = None)
     return Project(raw["project_id"], True, portrait, duration, "9:16", provider, resolved)
 
 
-def estimate_cost(project: Mapping[str, object] | Project, duration_seconds: int, billed_characters: int) -> list[CostLine]:
-    provider = project.resolved_provider if isinstance(project, Project) else str(project.get("provider"))
+def _rate(
+    env: Mapping[str, str] | None, name: str, default: str
+) -> Decimal:
+    try:
+        value = Decimal(str((env or {}).get(name, default)))
+    except Exception as exc:
+        raise ProjectValidationError(
+            f"{name} must be a finite non-negative decimal"
+        ) from exc
+    if not value.is_finite() or value < 0:
+        raise ProjectValidationError(f"{name} must be a finite non-negative decimal")
+    return value
+
+
+def estimate_cost(
+    project: Mapping[str, object] | Project,
+    duration_seconds: int,
+    billed_characters: int,
+    env: Mapping[str, str] | None = None,
+) -> list[CostLine]:
+    provider = (
+        project.resolved_provider
+        if isinstance(project, Project)
+        else str(project.get("provider"))
+    )
     duration = Decimal(duration_seconds)
+    aliyun_rate = _rate(env, "DHSV_ALIYUN_CNY_PER_MINUTE", "6")
+    heygen_rate = _rate(env, "DHSV_HEYGEN_USD_PER_SECOND", "0.05")
+    cosy_rate = _rate(env, "DHSV_COSYVOICE_CNY_PER_1000_CHARACTERS", "0")
     if provider == "aliyun-me":
-        video = CostLine("Aliyun digital human", "CNY", (duration / Decimal(60) * Decimal("6")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), f"{duration_seconds} seconds at 6 CNY/min")
+        video = CostLine(
+            "Aliyun digital human",
+            "CNY",
+            (duration / Decimal(60) * aliyun_rate).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            ),
+            f"{duration_seconds} seconds at {aliyun_rate} CNY/min",
+        )
     elif provider == "heygen":
-        video = CostLine("HeyGen digital human", "USD", (duration * Decimal("0.05")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP), f"{duration_seconds} seconds at 0.05 USD/sec")
+        video = CostLine(
+            "HeyGen digital human",
+            "USD",
+            (duration * heygen_rate).quantize(
+                Decimal("0.01"), rounding=ROUND_HALF_UP
+            ),
+            f"{duration_seconds} seconds at {heygen_rate} USD/sec",
+        )
     else:
-        video = CostLine("Fake digital human", "CNY", Decimal("0.00"), "local fake provider")
-    cosy = CostLine("CosyVoice", "CNY", Decimal("0.00"), f"{billed_characters} billed characters")
+        video = CostLine(
+            "Fake digital human", "CNY", Decimal("0.00"), "local fake provider"
+        )
+    cosy = CostLine(
+        "CosyVoice",
+        "CNY",
+        (Decimal(billed_characters) / Decimal(1000) * cosy_rate).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        ),
+        f"{billed_characters} billed characters at {cosy_rate} CNY/1000 characters",
+    )
     return [video, cosy]
 
 

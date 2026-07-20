@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -77,9 +79,82 @@ class ProjectContractTests(unittest.TestCase):
         self.assertEqual("CosyVoice", lines[1].service)
         self.assertIn("12", lines[1].basis)
 
+    def test_cost_rates_are_configurable_and_invalid_values_fail_closed(self):
+        env = {
+            "DHSV_ALIYUN_CNY_PER_MINUTE": "7.5",
+            "DHSV_HEYGEN_USD_PER_SECOND": "0.08",
+            "DHSV_COSYVOICE_CNY_PER_1000_CHARACTERS": "2",
+        }
+        lines = estimate_cost({"provider": "aliyun-me"}, 40, 500, env)
+        self.assertEqual(Decimal("5.00"), lines[0].amount)
+        self.assertEqual(Decimal("1.00"), lines[1].amount)
+        self.assertIn("7.5", lines[0].basis)
+        for invalid in ("nan", "Infinity", "-1", "oops"):
+            with self.subTest(invalid=invalid), self.assertRaises(ProjectValidationError):
+                estimate_cost(
+                    {"provider": "heygen"},
+                    40,
+                    12,
+                    {"DHSV_HEYGEN_USD_PER_SECOND": invalid},
+                )
+
+    def test_estimate_cost_cli_uses_environment_rates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project = self.write_project(directory, provider="heygen")
+            script = root / "script.json"
+            script.write_text(
+                json.dumps({"segments": [{"text": "x" * 500}]}), encoding="utf-8"
+            )
+            command_env = os.environ.copy()
+            command_env.update(
+                {
+                    "HEYGEN_API_KEY": "test-key",
+                    "DHSV_ALIYUN_CNY_PER_MINUTE": "6",
+                    "DHSV_HEYGEN_USD_PER_SECOND": "0.08",
+                    "DHSV_COSYVOICE_CNY_PER_1000_CHARACTERS": "2",
+                }
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    str(Path(__file__).resolve().parents[1] / "scripts" / "estimate_cost.py"),
+                    str(project),
+                    "--script",
+                    str(script),
+                ],
+                env=command_env,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, completed.returncode, completed.stderr)
+            lines = json.loads(completed.stdout)["lines"]
+            self.assertEqual("3.20", lines[0]["amount"])
+            self.assertIn("0.08", lines[0]["basis"])
+            self.assertEqual("1.00", lines[1]["amount"])
+
     def test_paid_approval_must_exactly_match_current_estimate(self):
         script_hash = hashlib.sha256(b"script").hexdigest()
         narration_hash = hashlib.sha256(b"narration").hexdigest()
         approval = PaidApproval("aliyun-me", "CNY", Decimal("4.00"), script_hash, narration_hash)
-        self.assertTrue(validate_paid_approval(approval, "aliyun-me", "CNY", Decimal("4.00"), script_hash, narration_hash))
-        self.assertFalse(validate_paid_approval(approval, "heygen", "CNY", Decimal("4.00"), script_hash, narration_hash))
+        self.assertTrue(
+            validate_paid_approval(
+                approval,
+                "aliyun-me",
+                "CNY",
+                Decimal("4.00"),
+                script_hash,
+                narration_hash,
+            )
+        )
+        self.assertFalse(
+            validate_paid_approval(
+                approval,
+                "heygen",
+                "CNY",
+                Decimal("4.00"),
+                script_hash,
+                narration_hash,
+            )
+        )

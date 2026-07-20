@@ -1,7 +1,10 @@
 import hashlib
 import json
+import multiprocessing
+import os
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from decimal import Decimal
@@ -161,6 +164,40 @@ class CrashAfterRemoteCreationProvider(RecordingProvider):
         raise RemoteCreationCrash("simulated process interruption after remote creation")
 
 
+def _compose_lock_worker(project_file, ready, go, active, collision):
+    project_file = Path(project_file)
+    ready = Path(ready)
+    go = Path(go)
+    active = Path(active)
+    collision = Path(collision)
+
+    def composer(original, destination, state):
+        owns_marker = False
+        try:
+            descriptor = os.open(active, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            collision.write_text("overlap", encoding="utf-8")
+        else:
+            os.close(descriptor)
+            owns_marker = True
+        time.sleep(0.5)
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"composed")
+        if owns_marker:
+            active.unlink()
+        return {}
+
+    pipeline = Pipeline(project_file, composer=composer)
+    ready.write_text("ready", encoding="utf-8")
+    deadline = time.monotonic() + 10
+    while not go.is_file():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("compose worker did not receive start signal")
+        time.sleep(0.01)
+    pipeline.compose()
+
+
 class PipelineTests(unittest.TestCase):
     def write_project(self, directory, provider="fake"):
         root = Path(directory)
@@ -277,6 +314,7 @@ class PipelineTests(unittest.TestCase):
                 narrator=ForbiddenNarrator(),
                 provider_factory=forbidden_provider_factory,
             )
+            pipeline.env["DHSV_COSYVOICE_CNY_PER_1000_CHARACTERS"] = "2"
             state = pipeline.plan()
             self.assertEqual("draft", state.phase)
             self.assertTrue((Path(directory) / "script-draft.json").is_file())
@@ -285,6 +323,8 @@ class PipelineTests(unittest.TestCase):
             self.assertTrue(estimate["estimate_only"])
             self.assertTrue(estimate["requires_confirmation"])
             self.assertEqual("fake", estimate["provider"])
+            self.assertEqual("0.04", estimate["lines"][1]["amount"])
+            self.assertIn("2 CNY/1000 characters", estimate["lines"][1]["basis"])
 
     def test_plan_rejects_missing_portrait_before_writing_state_or_estimate(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -621,13 +661,30 @@ class PipelineTests(unittest.TestCase):
             pipeline, _, _, factory = self.prepare_narrated(
                 directory, provider="aliyun-me", recording_provider=provider
             )
+            pipeline.env["DHSV_HEYGEN_USD_PER_SECOND"] = "0.08"
             pipeline.submit(self.write_approval(directory))
             report = pipeline.resume()
             self.assertIsInstance(report, AlternateProviderReport)
             self.assertEqual("heygen", report.provider)
             self.assertEqual("USD", report.estimate.currency)
-            self.assertEqual(Decimal("2.00"), report.estimate.amount)
+            self.assertEqual(Decimal("3.20"), report.estimate.amount)
+            self.assertIn("0.08", report.estimate.basis)
             self.assertEqual(["aliyun-me", "aliyun-me"], factory.calls)
+
+    def test_rate_change_rejects_old_approval_before_provider_construction(self):
+        changes = {
+            "DHSV_ALIYUN_CNY_PER_MINUTE": "7",
+            "DHSV_COSYVOICE_CNY_PER_1000_CHARACTERS": "2",
+        }
+        for name, value in changes.items():
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as directory:
+                pipeline, _, _, factory = self.prepare_narrated(
+                    directory, provider="aliyun-me"
+                )
+                pipeline.env[name] = value
+                with self.assertRaises(ApprovalError):
+                    pipeline.submit(self.write_approval(directory))
+                self.assertEqual([], factory.calls)
 
     def test_composition_failure_preserves_paid_original_and_downloaded_phase(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -653,6 +710,62 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(
                 "downloaded", StateStore(Path(directory) / "state.json").load().phase
             )
+
+    def test_compose_serializes_composers_across_independent_processes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            project_files = []
+            for index in range(2):
+                project_root = root / f"project-{index}"
+                project_root.mkdir()
+                project_file = project_root / "project.json"
+                project_file.write_text(
+                    json.dumps({"output": "out/final.mp4"}), encoding="utf-8"
+                )
+                original = project_root / ".runtime" / "provider-original.mp4"
+                original.parent.mkdir()
+                original.write_bytes(b"provider-original")
+                StateStore(project_root / "state.json").save(
+                    JobState(
+                        f"demo-{index}",
+                        "fake",
+                        "downloaded",
+                        "job",
+                        "key",
+                        "script",
+                        "narration",
+                        "0.00",
+                        "now",
+                        "now",
+                        {"provider_original_path": str(original)},
+                    )
+                )
+                project_files.append(project_file)
+
+            go = root / "go"
+            active = root / "active"
+            collision = root / "collision"
+            context = multiprocessing.get_context("spawn")
+            processes = []
+            for index, project_file in enumerate(project_files):
+                ready = root / f"ready-{index}"
+                process = context.Process(
+                    target=_compose_lock_worker,
+                    args=(project_file, ready, go, active, collision),
+                )
+                process.start()
+                processes.append((process, ready))
+
+            deadline = time.monotonic() + 10
+            while not all(ready.is_file() for _, ready in processes):
+                if time.monotonic() >= deadline:
+                    self.fail("compose workers did not become ready")
+                time.sleep(0.01)
+            go.write_text("go", encoding="utf-8")
+            for process, _ in processes:
+                process.join(timeout=10)
+                self.assertEqual(0, process.exitcode)
+            self.assertFalse(collision.exists(), "composers overlapped across processes")
 
     def test_compose_and_verify_use_injected_seams_with_safe_phase_transitions(self):
         with tempfile.TemporaryDirectory() as directory:

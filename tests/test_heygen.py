@@ -146,6 +146,17 @@ class HeyGenProviderTests(unittest.TestCase):
         self.assertEqual("portrait-asset", payload["image_asset_id"])
         self.assertNotIn("avatar_id", payload)
 
+    def test_false_image_fallback_string_does_not_enable_image_mode(self):
+        session = FakeSession(posts=[response("portrait-asset"), response("avatar-new")])
+        provider = HeyGenProvider(
+            env(HEYGEN_IMAGE_FALLBACK="false"),
+            watermark_free_confirmed=True,
+            session=session,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            avatar = provider.create_or_reuse_avatar(self.request(directory), state())
+        self.assertEqual("avatar-new", avatar.id)
+
     def test_audio_multipart_and_video_payload_are_exact_for_avatar_mode(self):
         session = FakeSession(posts=[response("audio-asset"), response("video-1")])
         provider = HeyGenProvider(

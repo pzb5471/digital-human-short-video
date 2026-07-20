@@ -21,7 +21,7 @@ def main() -> int:
     except (IndexError, ValueError, OSError, json.JSONDecodeError, ProjectValidationError) as exc:
         print(str(exc), file=sys.stderr)
         return 2
-    lines = estimate_cost(project, project.duration_seconds, count)
+    lines = estimate_cost(project, project.duration_seconds, count, os.environ)
     print(json.dumps({"estimate_only": True, "requires_confirmation": True, "provider": project.resolved_provider, "lines": [{**asdict(line), "amount": str(line.amount)} for line in lines]}, ensure_ascii=False))
     return 0
 

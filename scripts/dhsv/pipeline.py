@@ -10,6 +10,7 @@ from pathlib import Path
 import requests
 
 from .captions import build_captions, render_ass, render_srt
+from .locking import exclusive_process_lock
 from .models import CostLine, JobState, PaidApproval
 from .project import estimate_cost, load_project, validate_paid_approval
 from .providers.base import (
@@ -39,6 +40,9 @@ class CompositionError(PipelineError):
 
 class VerificationError(PipelineError):
     pass
+
+
+COMPOSE_LOCK_PATH = Path(__file__).resolve().parents[2] / ".runtime" / "compose.lock"
 
 
 @dataclass(frozen=True)
@@ -127,7 +131,7 @@ class Pipeline:
         self._atomic_write_json(self.draft_path, document)
         script_sha256 = hashlib.sha256(self.draft_path.read_bytes()).hexdigest()
         billed_characters = sum(len(segment.spoken_text) for segment in script.segments)
-        lines = estimate_cost(project, project.duration_seconds, billed_characters)
+        lines = estimate_cost(project, project.duration_seconds, billed_characters, self.env)
         self._atomic_write_json(self.estimate_path, self._serialize_costs(project, lines))
         now = self._now()
         state = JobState(
@@ -279,22 +283,28 @@ class Pipeline:
         ) as exc:
             raise ApprovalError(f"cannot read paid approval: {exc}") from exc
 
-    def _video_cost(self):
+    def _recorded_costs(self):
         try:
             estimate = json.loads(self.estimate_path.read_text(encoding="utf-8"))
-            line = estimate["lines"][0]
-            return CostLine(
-                str(line["service"]),
-                str(line["currency"]),
-                Decimal(str(line["amount"])),
-                str(line["basis"]),
-            )
+            lines = estimate["lines"]
+            if not lines:
+                raise ValueError("estimate contains no cost lines")
+            return [
+                CostLine(
+                    str(line["service"]),
+                    str(line["currency"]),
+                    Decimal(str(line["amount"])),
+                    str(line["basis"]),
+                )
+                for line in lines
+            ]
         except (
             OSError,
             json.JSONDecodeError,
             KeyError,
             IndexError,
             TypeError,
+            ValueError,
             InvalidOperation,
         ) as exc:
             raise PipelineError(f"cannot read current cost estimate: {exc}") from exc
@@ -366,22 +376,22 @@ class Pipeline:
             )
 
     def _validated_video_cost(self, state):
-        recorded = self._video_cost()
+        recorded = self._recorded_costs()
         project = load_project(self.project_file, self.env)
         script = load_script(self.draft_path)
         billed_characters = sum(len(segment.spoken_text) for segment in script.segments)
         expected = estimate_cost(
-            project, project.duration_seconds, billed_characters
-        )[0]
+            project, project.duration_seconds, billed_characters, self.env
+        )
         try:
             state_amount = Decimal(state.expected_cost)
         except InvalidOperation as exc:
             raise ApprovalError("state expected_cost is invalid") from exc
-        if recorded != expected or state_amount != expected.amount:
+        if recorded != expected or state_amount != expected[0].amount:
             raise ApprovalError(
                 "current estimate must exactly match the planned project and state"
             )
-        return recorded
+        return recorded[0]
 
     def _alternate_report(self, state):
         alternate = {"aliyun-me": "heygen", "heygen": "aliyun-me"}.get(
@@ -395,7 +405,7 @@ class Pipeline:
         script = load_script(self.draft_path)
         billed_characters = sum(len(segment.spoken_text) for segment in script.segments)
         estimate = estimate_cost(
-            {"provider": alternate}, project.duration_seconds, billed_characters
+            {"provider": alternate}, project.duration_seconds, billed_characters, self.env
         )[0]
         return AlternateProviderReport(alternate, estimate)
 
@@ -619,7 +629,8 @@ class Pipeline:
         if destination == original.resolve():
             raise CompositionError("composition output must not overwrite provider original")
         try:
-            composition_result = self.composer(original, destination, state)
+            with exclusive_process_lock(COMPOSE_LOCK_PATH):
+                composition_result = self.composer(original, destination, state)
         except Exception as exc:
             raise CompositionError(f"composition failed: {exc}") from exc
         if not destination.is_file():
