@@ -6,7 +6,7 @@
 
 **Architecture:** Codex 负责创作并确认结构化脚本；Python 管线负责项目校验、成本计算、CosyVoice 分段配音、字幕时间轴、服务商调用、状态持久化和媒体验证；Remotion 模板负责 1080×1920 品牌包装。所有外部依赖都通过可注入客户端封装，测试默认使用假 HTTP/SDK 客户端和本地 FFmpeg 素材，真实收费测试必须显式启用。
 
-**Tech Stack:** Python 3.11+、`requests`、Alibaba Cloud IntelligentCreation Python SDK、`oss2`、标准库 `unittest`、Node.js 24、React 19、Remotion 4.0.367、TypeScript 5.9.3、FFmpeg/ffprobe 7。
+**Tech Stack:** Python 3.11+、`requests`、Alibaba Cloud IntelligentCreation Python SDK、`oss2`、标准库 `unittest`、Node.js 24、React 19、Remotion 4.0.494、TypeScript 5.9.3、FFmpeg/ffprobe 7。
 
 **Approved specification:** `docs/superpowers/specs/2026-07-19-digital-human-short-video-design.md`
 
@@ -342,16 +342,17 @@ git commit -m "feat: add script contract and synchronized captions"
 Required tests:
 
 - request URL is `{DASHSCOPE_WORKSPACE_ID}.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/SpeechSynthesizer` unless `DASHSCOPE_TTS_ENDPOINT` overrides it;
-- request uses `cosyvoice-v3.5-flash`, `longanyang`, WAV 24 kHz, `word_timestamp_enabled: true`, `enable_aigc_tag: false`;
-- SSE events merge ordered base64 chunks and retain `sentence.words` timestamps;
+- request uses the compatible defaults `cosyvoice-v3-flash`, `longanyang`, WAV 24 kHz, `word_timestamp_enabled: true`, `enable_aigc_tag: false`, with every synthesis field under `input`;
+- SSE events merge ordered `output.audio.data` base64 chunks and retain `output.sentence.words` timestamps;
 - each script segment is synthesized once and cached by a SHA-256 of model, voice, rate, spoken text, and seed;
 - FFmpeg concat includes generated silence for `pause_after_ms`, then normalizes with `loudnorm=I=-16:TP=-1:LRA=11`;
-- final duration over 58 seconds fails before provider submission; deviation over 8% produces `revision_required.json` naming only affected segments;
+- final duration over 58 seconds fails before provider submission; deviation over 8% produces `revision_required.json`, blocks the workflow, and requires a re-plan plus new approvals;
+- a durable per-segment paid intent prevents an ambiguous or interrupted CosyVoice POST from being repeated automatically;
 - `narration.wav.sha256` equals the actual file hash and is the only permitted audio hash in provider requests.
 
 **Step 2: Implement the client and audio-first pipeline**
 
-Use `requests.Session` with timeouts `(10, 120)`. Retry GET and pre-task TTS requests on 429/5xx with bounded exponential backoff. Never retry a provider mutation unless an idempotency key guarantees replay.
+Use `requests.Session` with timeouts `(10, 120)`. Retry only safe GET/HEAD requests on 429/5xx with bounded exponential backoff. Never automatically retry a paid TTS or provider POST after an ambiguous response.
 
 Write every segment under `.runtime/audio/segments/<segment-id>.wav`, every timestamp stream under `.runtime/audio/timestamps/<segment-id>.json`, and the merged result as `.runtime/audio/narration.wav`. Write hashes with atomic replacement.
 
@@ -417,7 +418,7 @@ Submission invariants:
 
 **Step 4: Implement HeyGen adapter**
 
-Use `POST /v3/assets` multipart for local portrait and audio. Prefer a cached `avatar_id`; otherwise create a photo avatar with an asset reference, and support one-off `type: image` as an explicit configuration fallback. Submit `POST /v3/videos` with:
+Use `POST /v3/assets` multipart for local audio. Prefer `HEYGEN_AVATAR_ID` or a cached `avatar_id`; with neither, fail before portrait upload unless one-off `type: image` is explicitly enabled, in which case upload the authorized portrait asset. Submit `POST /v3/videos` with:
 
 ```json
 {
@@ -471,12 +472,13 @@ Test these exact transitions:
 
 ```text
 run_pipeline.py plan PROJECT
-run_pipeline.py narrate PROJECT --script-approval SHA256
+run_pipeline.py narrate PROJECT --script-approval SHA256 --estimate-approval SHA256
 run_pipeline.py submit PROJECT --approval-file paid-approval.json
 run_pipeline.py resume PROJECT
 run_pipeline.py compose PROJECT
 run_pipeline.py verify PROJECT
-run_pipeline.py all PROJECT --script-approval SHA256 --approval-file paid-approval.json
+run_pipeline.py all PROJECT --script-approval SHA256 --estimate-approval SHA256
+run_pipeline.py all PROJECT --approval-file paid-approval.json
 ```
 
 `all` must stop after the estimate when approval is absent. It must never prompt hidden input inside automation; Codex presents the estimate to the user, writes the approved tuple to a local ignored file, then resumes.
@@ -523,14 +525,14 @@ git commit -m "feat: add resumable paid-safe pipeline"
     "render:test": "remotion render src/index.ts DigitalHumanShortVideo out/test.mp4 --props=src/fixture-props.json --codec=h264 --pixel-format=yuv420p --concurrency=2"
   },
   "dependencies": {
-    "@remotion/google-fonts": "4.0.367",
-    "@remotion/transitions": "4.0.367",
+    "@remotion/google-fonts": "4.0.494",
+    "@remotion/transitions": "4.0.494",
     "react": "19.2.0",
     "react-dom": "19.2.0",
-    "remotion": "4.0.367"
+    "remotion": "4.0.494"
   },
   "devDependencies": {
-    "@remotion/cli": "4.0.367",
+    "@remotion/cli": "4.0.494",
     "@types/react": "19.2.2",
     "typescript": "5.9.3"
   }
@@ -704,7 +706,7 @@ Set-Location 'D:\test\mouth\digital-human-short-video\template'
 npm run typecheck
 npm run render:test
 Set-Location 'D:\test\mouth'
-& 'D:\test\mouth\.venv\Scripts\python.exe' 'digital-human-short-video\scripts\verify_video.py' 'digital-human-short-video\template\out\test.mp4' --captions 'digital-human-short-video\template\src\fixture-props.json'
+& 'D:\test\mouth\.venv\Scripts\python.exe' 'digital-human-short-video\scripts\verify_video.py' 'digital-human-short-video\template\out\test.mp4' --captions 'PATH_TO_CAPTIONS_JSON' --narration 'PATH_TO_NARRATION_WAV' --manifest 'PATH_TO_VERIFICATION_MANIFEST_JSON' --out 'digital-human-short-video\.runtime\verification'
 git status --short
 ```
 
@@ -722,7 +724,8 @@ Do not run by default. If the user explicitly requests it, verify all four gates
 
 ```powershell
 $env:RUN_PAID_API_TESTS = '1'
-& 'D:\test\mouth\.venv\Scripts\python.exe' 'digital-human-short-video\scripts\run_pipeline.py' all 'PATH_TO_APPROVED_10_SECOND_PROJECT' --script-approval 'EXACT_SCRIPT_SHA256' --approval-file 'PATH_TO_LOCAL_IGNORED_APPROVAL_JSON'
+& 'D:\test\mouth\.venv\Scripts\python.exe' 'digital-human-short-video\scripts\run_pipeline.py' all 'PATH_TO_APPROVED_10_SECOND_PROJECT' --script-approval 'EXACT_SCRIPT_SHA256' --estimate-approval 'EXACT_ESTIMATE_SHA256'
+& 'D:\test\mouth\.venv\Scripts\python.exe' 'digital-human-short-video\scripts\run_pipeline.py' all 'PATH_TO_APPROVED_10_SECOND_PROJECT' --approval-file 'PATH_TO_LOCAL_IGNORED_APPROVAL_JSON'
 ```
 
 After completion, clear the session variable and never commit the paid-test project.
