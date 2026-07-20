@@ -104,7 +104,29 @@ class ProjectContractTests(unittest.TestCase):
             project = self.write_project(directory, provider="heygen")
             script = root / "script.json"
             script.write_text(
-                json.dumps({"segments": [{"text": "x" * 500}]}), encoding="utf-8"
+                json.dumps(
+                    {
+                        "segments": [
+                            {
+                                "id": "hook",
+                                "role": "hook",
+                                "spoken_text": "x" * 100,
+                                "subtitle_text": "hook",
+                                "pause_after_ms": 0,
+                                "keywords": ["hook"],
+                            },
+                            {
+                                "id": "cta",
+                                "role": "cta",
+                                "spoken_text": "y" * 100,
+                                "subtitle_text": "cta",
+                                "pause_after_ms": 0,
+                                "keywords": ["cta"],
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
             )
             command_env = os.environ.copy()
             command_env.update(
@@ -112,7 +134,7 @@ class ProjectContractTests(unittest.TestCase):
                     "HEYGEN_API_KEY": "test-key",
                     "DHSV_ALIYUN_CNY_PER_MINUTE": "6",
                     "DHSV_HEYGEN_USD_PER_SECOND": "0.08",
-                    "DHSV_COSYVOICE_CNY_PER_1000_CHARACTERS": "2",
+                    "DHSV_COSYVOICE_CNY_PER_1000_CHARACTERS": "5",
                 }
             )
             completed = subprocess.run(

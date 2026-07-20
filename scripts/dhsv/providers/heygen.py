@@ -167,12 +167,9 @@ class HeyGenProvider:
             "portrait",
         )
         self._checkpoints.record(portrait_asset_id=portrait_asset_id)
-        image_fallback = str(self.env.get("HEYGEN_IMAGE_FALLBACK", "")).lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
+        image_fallback = (
+            str(self.env.get("HEYGEN_IMAGE_FALLBACK", "")).strip().lower() == "true"
+        )
         if image_fallback:
             self._avatar_modes[portrait_asset_id] = "image"
             self._checkpoints.record(avatar_mode="image")

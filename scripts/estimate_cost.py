@@ -6,11 +6,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from dhsv.project import ProjectValidationError, estimate_cost, load_project
+from dhsv.script import ScriptValidationError, load_script
 
 
 def billed_characters(script_path: Path) -> int:
-    document = json.loads(script_path.read_text(encoding="utf-8"))
-    return sum(len(str(segment.get("text", ""))) for segment in document.get("segments", []))
+    script = load_script(script_path)
+    return sum(len(segment.spoken_text) for segment in script.segments)
 
 
 def main() -> int:
@@ -18,7 +19,14 @@ def main() -> int:
         project = load_project(sys.argv[1], os.environ)
         script_index = sys.argv.index("--script")
         count = billed_characters(Path(sys.argv[script_index + 1]))
-    except (IndexError, ValueError, OSError, json.JSONDecodeError, ProjectValidationError) as exc:
+    except (
+        IndexError,
+        ValueError,
+        OSError,
+        json.JSONDecodeError,
+        ProjectValidationError,
+        ScriptValidationError,
+    ) as exc:
         print(str(exc), file=sys.stderr)
         return 2
     lines = estimate_cost(project, project.duration_seconds, count, os.environ)
