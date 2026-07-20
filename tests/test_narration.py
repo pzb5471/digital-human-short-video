@@ -3,6 +3,8 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -15,6 +17,7 @@ from dhsv.narration import (
     NarrationValidationError,
 )
 from dhsv.media import FFmpegMedia
+import dhsv.narration as narration_module
 from dhsv.script import Script, Segment, validate_script
 
 
@@ -118,6 +121,43 @@ class NarrationTests(unittest.TestCase):
             with self.assertRaises(NarrationSubmissionUnknownError):
                 pipeline.build(script())
             self.assertEqual(1, len(client.calls))
+
+    def test_concurrent_builds_are_serialized_before_paid_intent_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            client = Client()
+            media = Media()
+            original_atomic_json = narration_module._atomic_json
+
+            def widened_race(path, value):
+                if Path(path).parent.name == "intents":
+                    time.sleep(0.15)
+                return original_atomic_json(path, value)
+
+            self.addCleanup(
+                setattr, narration_module, "_atomic_json", original_atomic_json
+            )
+            narration_module._atomic_json = widened_race
+            barrier = threading.Barrier(3)
+            errors = []
+
+            def worker():
+                try:
+                    barrier.wait()
+                    NarrationPipeline(client, media, runtime).build(script())
+                except BaseException as exc:
+                    errors.append(exc)
+
+            first = threading.Thread(target=worker)
+            second = threading.Thread(target=worker)
+            first.start()
+            second.start()
+            barrier.wait()
+            first.join(timeout=10)
+            second.join(timeout=10)
+            self.assertFalse(first.is_alive() or second.is_alive())
+            self.assertEqual([], errors)
+            self.assertEqual(2, len(client.calls))
 
     def test_merged_audio_over_58_seconds_fails_after_probe(self):
         class LongFinalMedia(Media):

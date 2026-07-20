@@ -4,6 +4,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .locking import exclusive_process_lock
 from .script import estimate_duration_ms
 
 
@@ -87,6 +88,11 @@ class NarrationPipeline:
         return normalized
 
     def build(self, script, *, rate=1.0, seed=0):
+        lock_path = self.runtime / "audio" / "narration.lock"
+        with exclusive_process_lock(lock_path):
+            return self._build_locked(script, rate=rate, seed=seed)
+
+    def _build_locked(self, script, *, rate=1.0, seed=0):
         if estimate_duration_ms(script) > 58000:
             raise NarrationValidationError("narration exceeds 58 seconds")
         audio_dir = self.runtime / "audio"
