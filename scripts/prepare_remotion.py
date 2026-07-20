@@ -9,8 +9,8 @@ def _owned(root,value):
  except ValueError as e: raise PreparationError("asset path escapes project root") from e
  if not p.is_file(): raise PreparationError(f"asset missing: {value}")
  return p
-def prepare_remotion(project_file,out_dir):
- project_file=Path(project_file).resolve(); root=project_file.parent; out=Path(out_dir).resolve()
+def prepare_remotion(project_file,out_dir,project_root=None):
+ project_file=Path(project_file).resolve(); root=Path(project_root).resolve() if project_root else project_file.parent; out=Path(out_dir).resolve()
  if tuple(part.lower() for part in out.parts[-2:]) != ("public","project"): raise PreparationError("output must be template/public/project")
  out.mkdir(parents=True,exist_ok=True); doc=json.loads(project_file.read_text(encoding="utf-8"))
  if not doc.get("provider_original"): raise PreparationError("provider_original is required")

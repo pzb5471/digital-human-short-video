@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Mapping
 
 from .models import CostLine, PaidApproval
@@ -29,7 +29,17 @@ class Project:
     resolved_provider: str
 
 
+def normalize_environment(env: Mapping[str, str] | None) -> dict[str, str]:
+    normalized = dict(env or {})
+    if not normalized.get("OSS_ENDPOINT") and normalized.get("ALIYUN_OSS_ENDPOINT"):
+        normalized["OSS_ENDPOINT"] = normalized["ALIYUN_OSS_ENDPOINT"]
+    if not normalized.get("OSS_BUCKET") and normalized.get("ALIYUN_OSS_BUCKET"):
+        normalized["OSS_BUCKET"] = normalized["ALIYUN_OSS_BUCKET"]
+    return normalized
+
+
 def resolve_provider(provider: str, env: Mapping[str, str]) -> str:
+    env = normalize_environment(env)
     if provider == "auto":
         if all(env.get(name) for name in ALIYUN_REQUIRED):
             return "aliyun-me"
@@ -57,7 +67,13 @@ def load_project(project_file: str | Path, env: Mapping[str, str] | None = None)
     portrait_value = raw.get("portrait")
     if not isinstance(portrait_value, str) or not portrait_value:
         raise ProjectValidationError("portrait is required")
+    if Path(portrait_value).is_absolute() or PureWindowsPath(portrait_value).is_absolute():
+        raise ProjectValidationError("portrait must be a project-relative path")
     portrait = (path.parent / portrait_value).resolve()
+    try:
+        portrait.relative_to(path.parent)
+    except ValueError as exc:
+        raise ProjectValidationError("portrait path escapes the project directory") from exc
     if portrait.suffix.lower() not in PORTRAIT_EXTENSIONS:
         raise ProjectValidationError("portrait has an unsupported extension")
     duration = raw.get("duration_seconds")
@@ -70,7 +86,7 @@ def load_project(project_file: str | Path, env: Mapping[str, str] | None = None)
     provider = raw.get("provider", "auto")
     if not isinstance(provider, str):
         raise ProjectValidationError("provider must be a string")
-    resolved = resolve_provider(provider, env or {})
+    resolved = resolve_provider(provider, normalize_environment(env))
     return Project(raw["project_id"], True, portrait, duration, "9:16", provider, resolved)
 
 

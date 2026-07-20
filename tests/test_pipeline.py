@@ -1,4 +1,5 @@
 import hashlib
+import io
 import json
 import multiprocessing
 import os
@@ -6,6 +7,7 @@ import sys
 import tempfile
 import time
 import unittest
+from contextlib import redirect_stderr
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
@@ -83,6 +85,40 @@ class RecordingNarrator:
         hash_path = audio_dir / "narration.wav.sha256"
         hash_path.write_text(digest + "\n", encoding="utf-8")
         return NarrationResult(narration, hash_path)
+
+
+class TimestampNarrator(RecordingNarrator):
+    def build(self, script):
+        result = super().build(script)
+        timestamps_path = self.runtime / "audio" / "timestamps.json"
+        timestamps_path.write_text(
+            json.dumps(
+                {
+                    "segments": [
+                        {
+                            "id": "hook",
+                            "start_ms": 0,
+                            "end_ms": 321,
+                            "words": [
+                                {"text": "Start", "start_ms": 0, "end_ms": 200},
+                                {"text": "here", "start_ms": 200, "end_ms": 321},
+                            ],
+                        },
+                        {
+                            "id": "cta",
+                            "start_ms": 421,
+                            "end_ms": 777,
+                            "words": [
+                                {"text": "Learn", "start_ms": 421, "end_ms": 600},
+                                {"text": "more", "start_ms": 600, "end_ms": 777},
+                            ],
+                        },
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        return NarrationResult(result.narration_path, result.hash_path, timestamps_path)
 
 
 class RecordingProvider:
@@ -253,7 +289,9 @@ class PipelineTests(unittest.TestCase):
     def prepare_narrated(self, directory, **kwargs):
         pipeline, narrator, provider, factory = self.make_pipeline(directory, **kwargs)
         planned = pipeline.plan()
-        narrated = pipeline.narrate(planned.script_sha256)
+        narrated = pipeline.narrate(
+            planned.script_sha256, planned.artifacts["estimate_sha256"]
+        )
         self.assertEqual("narrated", narrated.phase)
         return pipeline, narrator, provider, factory
 
@@ -325,6 +363,10 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual("fake", estimate["provider"])
             self.assertEqual("0.04", estimate["lines"][1]["amount"])
             self.assertIn("2 CNY/1000 characters", estimate["lines"][1]["basis"])
+            self.assertEqual(
+                hashlib.sha256(estimate_path.read_bytes()).hexdigest(),
+                state.artifacts["estimate_sha256"],
+            )
 
     def test_plan_rejects_missing_portrait_before_writing_state_or_estimate(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -352,9 +394,13 @@ class PipelineTests(unittest.TestCase):
             )
             planned = pipeline.plan()
             with self.assertRaises(ApprovalError):
-                pipeline.narrate("0" * 64)
+                pipeline.narrate("0" * 64, planned.artifacts["estimate_sha256"])
+            with self.assertRaises(ApprovalError):
+                pipeline.narrate(planned.script_sha256, "0" * 64)
             self.assertEqual(0, narrator.calls)
-            narrated = pipeline.narrate(planned.script_sha256)
+            narrated = pipeline.narrate(
+                planned.script_sha256, planned.artifacts["estimate_sha256"]
+            )
             self.assertEqual(1, narrator.calls)
             self.assertEqual("narrated", narrated.phase)
             self.assertEqual([], calls)
@@ -366,22 +412,41 @@ class PipelineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             pipeline, _, _, _ = self.make_pipeline(directory)
             planned = pipeline.plan()
-            first = pipeline.narrate(planned.script_sha256)
+            first = pipeline.narrate(planned.script_sha256, planned.artifacts["estimate_sha256"])
 
             (Path(directory) / "assets" / "portrait.png").write_bytes(
                 b"replacement-portrait"
             )
             replanned = pipeline.plan()
-            second = pipeline.narrate(replanned.script_sha256)
+            second = pipeline.narrate(replanned.script_sha256, replanned.artifacts["estimate_sha256"])
 
             self.assertNotEqual(first.portrait_sha256, second.portrait_sha256)
             self.assertNotEqual(first.idempotency_key, second.idempotency_key)
+
+    def test_narrate_builds_captions_from_actual_tts_timestamps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            narrator = TimestampNarrator(Path(directory) / ".runtime")
+            pipeline, _, _, _ = self.make_pipeline(directory, narrator=narrator)
+            planned = pipeline.plan()
+            narrated = pipeline.narrate(
+                planned.script_sha256, planned.artifacts["estimate_sha256"]
+            )
+            captions = json.loads(
+                Path(narrated.artifacts["captions_json_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual((0, 321), (captions["cues"][0]["start_ms"], captions["cues"][0]["end_ms"]))
+            self.assertEqual((421, 777), (captions["cues"][1]["start_ms"], captions["cues"][1]["end_ms"]))
+            self.assertEqual(str(narrator.runtime / "audio" / "timestamps.json"), narrated.artifacts["timestamps_path"])
+            self.assertEqual(
+                hashlib.sha256((narrator.runtime / "audio" / "timestamps.json").read_bytes()).hexdigest(),
+                narrated.artifacts["timestamps_sha256"],
+            )
 
     def test_narration_idempotency_key_changes_when_project_semantics_change(self):
         with tempfile.TemporaryDirectory() as directory:
             pipeline, _, _, _ = self.make_pipeline(directory)
             planned = pipeline.plan()
-            first = pipeline.narrate(planned.script_sha256)
+            first = pipeline.narrate(planned.script_sha256, planned.artifacts["estimate_sha256"])
 
             changed = project_document()
             changed["title"] = "A semantically different project"
@@ -389,7 +454,7 @@ class PipelineTests(unittest.TestCase):
                 json.dumps(changed), encoding="utf-8"
             )
             replanned = pipeline.plan()
-            second = pipeline.narrate(replanned.script_sha256)
+            second = pipeline.narrate(replanned.script_sha256, replanned.artifacts["estimate_sha256"])
 
             self.assertNotEqual(first.project_sha256, second.project_sha256)
             self.assertNotEqual(first.idempotency_key, second.idempotency_key)
@@ -403,9 +468,9 @@ class PipelineTests(unittest.TestCase):
                     directory, provider=provider_name
                 )
                 planned = pipeline.plan()
-                first = pipeline.narrate(planned.script_sha256)
+                first = pipeline.narrate(planned.script_sha256, planned.artifacts["estimate_sha256"])
                 replanned = pipeline.plan()
-                second = pipeline.narrate(replanned.script_sha256)
+                second = pipeline.narrate(replanned.script_sha256, replanned.artifacts["estimate_sha256"])
                 self.assertEqual(first.idempotency_key, second.idempotency_key)
 
                 approval = self.write_approval(directory)
@@ -504,7 +569,7 @@ class PipelineTests(unittest.TestCase):
                 narrator=RecordingNarrator(Path(directory) / ".runtime"),
             )
             planned = pipeline.plan()
-            pipeline.narrate(planned.script_sha256)
+            pipeline.narrate(planned.script_sha256, planned.artifacts["estimate_sha256"])
             approval = self.write_approval(directory)
             with self.assertRaises(PipelineError):
                 pipeline.submit(approval)
@@ -652,6 +717,25 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual("downloaded", repeated.phase)
             self.assertEqual(1, len(provider.download_calls))
             self.assertEqual(calls_before, len(factory.calls))
+
+    def test_resume_revalidates_current_portrait_authorization_before_provider_access(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = RecordingProvider(
+                Path(directory) / "state.json", statuses=("processing",)
+            )
+            pipeline, _, _, factory = self.prepare_narrated(
+                directory, recording_provider=provider
+            )
+            pipeline.submit(self.write_approval(directory))
+            calls_before = list(factory.calls)
+            document = project_document()
+            document["rights_confirmed"] = False
+            (Path(directory) / "project.json").write_text(
+                json.dumps(document), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "rights_confirmed"):
+                pipeline.resume()
+            self.assertEqual(calls_before, factory.calls)
 
     def test_failed_provider_reports_alternate_estimate_without_constructing_it(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -856,13 +940,53 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(["job-1"], provider.get_calls)
             self.assertEqual(approved_draft, draft_path.read_bytes())
 
+    def test_all_advances_narrate_then_existing_job_through_compose_and_verify(self):
+        with tempfile.TemporaryDirectory() as directory:
+            provider = RecordingProvider(
+                Path(directory) / "state.json", statuses=("completed",)
+            )
+
+            def composer(original, destination, state):
+                Path(destination).parent.mkdir(parents=True, exist_ok=True)
+                Path(destination).write_bytes(b"composed")
+                return {
+                    "watermark_layers_omitted": True,
+                    "watermark_removal_postprocessing": False,
+                }
+
+            pipeline, _, _, _ = self.make_pipeline(
+                directory,
+                recording_provider=provider,
+                composer=composer,
+                verifier=lambda output, state: True,
+            )
+            planned = pipeline.all()
+            narrated = pipeline.all(
+                script_approval=planned.script_sha256,
+                estimate_approval=planned.artifacts["estimate_sha256"],
+            )
+            self.assertEqual("narrated", narrated.phase)
+            approval = self.write_approval(directory)
+            submitted = pipeline.all(approval_file=approval)
+            self.assertEqual("submitted", submitted.phase)
+            finished = pipeline.all()
+            self.assertEqual("verified", finished.phase)
+            self.assertEqual(1, provider.submit_calls)
+
     def test_cli_exposes_exact_noninteractive_commands_and_approval_is_ignored(self):
         from run_pipeline import build_parser
 
         parser = build_parser()
         commands = (
             ["plan", "project.json"],
-            ["narrate", "project.json", "--script-approval", "a" * 64],
+            [
+                "narrate",
+                "project.json",
+                "--script-approval",
+                "a" * 64,
+                "--estimate-approval",
+                "b" * 64,
+            ],
             ["submit", "project.json", "--approval-file", "paid-approval.json"],
             ["resume", "project.json"],
             ["compose", "project.json"],
@@ -872,6 +996,8 @@ class PipelineTests(unittest.TestCase):
                 "project.json",
                 "--script-approval",
                 "a" * 64,
+                "--estimate-approval",
+                "b" * 64,
                 "--approval-file",
                 "paid-approval.json",
             ],
@@ -888,6 +1014,30 @@ class PipelineTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("**/paid-approval.json", gitignore)
+
+    def test_cli_redacts_signed_urls_from_unexpected_exceptions(self):
+        import run_pipeline
+
+        class FailingPipeline:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def plan(self):
+                raise RuntimeError(
+                    "download failed at https://download.example/video.mp4?token=super-secret"
+                )
+
+        stderr = io.StringIO()
+        original = run_pipeline.Pipeline
+        run_pipeline.Pipeline = FailingPipeline
+        try:
+            with redirect_stderr(stderr):
+                code = run_pipeline.main(["plan", "project.json"])
+        finally:
+            run_pipeline.Pipeline = original
+        self.assertEqual(2, code)
+        self.assertNotIn("super-secret", stderr.getvalue())
+        self.assertIn("[REDACTED", stderr.getvalue())
 
 
 if __name__ == "__main__":

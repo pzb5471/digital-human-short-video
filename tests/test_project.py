@@ -58,6 +58,31 @@ class ProjectContractTests(unittest.TestCase):
                 with self.assertRaises(ProjectValidationError):
                     load_project(self.write_project(directory, **changes), env={})
 
+    def test_portrait_must_be_a_project_relative_contained_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            outside = Path(directory).parent / "outside.png"
+            for portrait in (str(outside.resolve()), "../outside.png", "C:\\outside.png"):
+                with self.subTest(portrait=portrait), self.assertRaisesRegex(
+                    ProjectValidationError, "project-relative|escapes"
+                ):
+                    load_project(
+                        self.write_project(directory, portrait=portrait, provider="fake"),
+                        env={},
+                    )
+
+    def test_aliyun_environment_aliases_work_outside_pipeline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            project = load_project(
+                self.write_project(directory, provider="aliyun-me"),
+                env={
+                    "ALIBABA_CLOUD_ACCESS_KEY_ID": "ak",
+                    "ALIBABA_CLOUD_ACCESS_KEY_SECRET": "sk",
+                    "ALIYUN_OSS_ENDPOINT": "oss-cn-test.aliyuncs.com",
+                    "ALIYUN_OSS_BUCKET": "bucket",
+                },
+            )
+            self.assertEqual("aliyun-me", project.resolved_provider)
+
     def test_auto_provider_requires_complete_capabilities(self):
         aliyun = {
             "ALIBABA_CLOUD_ACCESS_KEY_ID": "ak",

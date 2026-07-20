@@ -133,6 +133,7 @@ class Pipeline:
         billed_characters = sum(len(segment.spoken_text) for segment in script.segments)
         lines = estimate_cost(project, project.duration_seconds, billed_characters, self.env)
         self._atomic_write_json(self.estimate_path, self._serialize_costs(project, lines))
+        estimate_sha256 = hashlib.sha256(self.estimate_path.read_bytes()).hexdigest()
         now = self._now()
         state = JobState(
             project.project_id,
@@ -148,6 +149,7 @@ class Pipeline:
             {
                 "script_draft_path": str(self.draft_path),
                 "estimate_path": str(self.estimate_path),
+                "estimate_sha256": estimate_sha256,
             },
             portrait_sha256,
             project_sha256,
@@ -169,17 +171,49 @@ class Pipeline:
         from .narration import NarrationPipeline
 
         self.narrator = NarrationPipeline(
-            CosyVoiceClient(workspace_id, api_key), FFmpegMedia(), self.runtime
+            CosyVoiceClient(
+                workspace_id,
+                api_key,
+                model=self.env.get("DASHSCOPE_TTS_MODEL", "cosyvoice-v3-flash"),
+                voice=self.env.get("DASHSCOPE_TTS_VOICE", "longanyang"),
+                endpoint=self.env.get("DASHSCOPE_TTS_ENDPOINT"),
+            ),
+            FFmpegMedia(),
+            self.runtime,
         )
         return self.narrator
 
-    def narrate(self, script_approval):
+    def _validate_estimate_approval(self, state, estimate_approval):
+        if not self.estimate_path.is_file():
+            raise ApprovalError("planned estimate is missing")
+        current_hash = hashlib.sha256(self.estimate_path.read_bytes()).hexdigest()
+        planned_hash = str(state.artifacts.get("estimate_sha256", ""))
+        if estimate_approval != current_hash or planned_hash != current_hash:
+            raise ApprovalError(
+                "estimate approval SHA-256 must exactly match the planned estimate"
+            )
+        current_project_hash = hashlib.sha256(self.project_file.read_bytes()).hexdigest()
+        project = load_project(self.project_file, self.env)
+        if not project.portrait.is_file():
+            raise ApprovalError("approved portrait is missing")
+        current_portrait_hash = hashlib.sha256(project.portrait.read_bytes()).hexdigest()
+        if (
+            state.project_sha256 != current_project_hash
+            or state.portrait_sha256 != current_portrait_hash
+        ):
+            raise ApprovalError(
+                "current project and portrait bytes must match the planned SHA-256 values"
+            )
+        self._validated_video_cost(state)
+
+    def narrate(self, script_approval, estimate_approval):
         state = self.state_store.load()
         current_hash = hashlib.sha256(self.draft_path.read_bytes()).hexdigest()
         if script_approval != current_hash or state.script_sha256 != current_hash:
             raise ApprovalError(
                 "script approval SHA-256 must exactly match the planned draft"
             )
+        self._validate_estimate_approval(state, estimate_approval)
         script = load_script(self.draft_path)
         result = self._get_narrator().build(script)
         narration_path = Path(result.narration_path).resolve()
@@ -187,7 +221,20 @@ class Pipeline:
         recorded_hash = Path(result.hash_path).read_text(encoding="utf-8").strip()
         if recorded_hash != narration_sha256:
             raise PipelineError("narration hash file does not match narration.wav")
-        captions = build_captions(script, {})
+        timestamps_path = (
+            Path(result.timestamps_path).resolve()
+            if getattr(result, "timestamps_path", None)
+            else None
+        )
+        timestamps = {}
+        if timestamps_path is not None:
+            if not timestamps_path.is_file():
+                raise PipelineError("narrator timestamps_path is missing")
+            try:
+                timestamps = json.loads(timestamps_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise PipelineError(f"cannot read narrator timestamps: {exc}") from exc
+        captions = build_captions(script, timestamps)
         captions_json = self.runtime / "captions.json"
         captions_srt = self.runtime / "captions.srt"
         captions_ass = self.runtime / "captions.ass"
@@ -208,6 +255,11 @@ class Pipeline:
             "captions_srt_path": str(captions_srt),
             "captions_ass_path": str(captions_ass),
         }
+        if timestamps_path is not None:
+            artifacts["timestamps_path"] = str(timestamps_path)
+            artifacts["timestamps_sha256"] = hashlib.sha256(
+                timestamps_path.read_bytes()
+            ).hexdigest()
         narrated = replace(
             state,
             phase="narrated",
@@ -262,6 +314,14 @@ class Pipeline:
                 checkpoint_sink=checkpoint_sink,
             )
         raise PipelineError(f"unsupported provider: {provider_name}")
+
+    def _revalidate_authorization(self):
+        project = load_project(self.project_file, self.env)
+        if not project.portrait.is_file():
+            raise ApprovalError(
+                "authorized portrait is missing; provider access is blocked"
+            )
+        return project
 
     def _read_approval(self, approval_file):
         try:
@@ -475,6 +535,7 @@ class Pipeline:
         state_box = [state]
         checkpoint_sink = self._checkpoint_sink(state_box)
         if state.job_id is not None:
+            self._revalidate_authorization()
             provider = self._provider(state.provider, checkpoint_sink)
             status = provider.get_status(state.job_id).status
             polled = replace(
@@ -500,7 +561,7 @@ class Pipeline:
                 "paid approval must exactly match provider, currency, amount, "
                 "script SHA-256, narration SHA-256, and portrait SHA-256"
             )
-        project = load_project(self.project_file, self.env)
+        project = self._revalidate_authorization()
         provider = self._provider(state.provider, checkpoint_sink)
         capability = provider.validate_credentials()
         capability_state = replace(
@@ -565,6 +626,7 @@ class Pipeline:
         if state.job_id is None:
             raise PipelineError("resume requires an existing provider job ID")
         state_box = [state]
+        self._revalidate_authorization()
         provider = self._provider(
             state.provider, self._checkpoint_sink(state_box)
         )
@@ -609,6 +671,23 @@ class Pipeline:
             raise PipelineError("output path must stay within the project directory") from exc
         return destination
 
+    def _get_composer(self):
+        if self.composer is None:
+            from .composition import RemotionComposer
+
+            template_dir = Path(__file__).resolve().parents[2] / "template"
+            self.composer = RemotionComposer(
+                self.project_file, self.runtime, template_dir
+            )
+        return self.composer
+
+    def _get_verifier(self):
+        if self.verifier is None:
+            from .composition import ProductVerifier
+
+            self.verifier = ProductVerifier(self.runtime)
+        return self.verifier
+
     def compose(self):
         state = self.state_store.load()
         if state.phase in {"composed", "verified"}:
@@ -621,16 +700,13 @@ class Pipeline:
         original = Path(str(original_value))
         if not original.is_file():
             raise PipelineError("paid provider original is missing")
-        if self.composer is None:
-            raise CompositionError(
-                "composition is not configured; Task 8 must inject a composer"
-            )
+        composer = self._get_composer()
         destination = self._output_path()
         if destination == original.resolve():
             raise CompositionError("composition output must not overwrite provider original")
         try:
             with exclusive_process_lock(COMPOSE_LOCK_PATH):
-                composition_result = self.composer(original, destination, state)
+                composition_result = composer(original, destination, state)
         except Exception as exc:
             raise CompositionError(f"composition failed: {exc}") from exc
         if not destination.is_file():
@@ -675,49 +751,75 @@ class Pipeline:
         output_value = state.artifacts.get("composed_path")
         if not output_value or not Path(str(output_value)).is_file():
             raise PipelineError("composed output is missing")
-        if self.verifier is None:
-            raise VerificationError(
-                "verification is not configured; Task 9 must inject a verifier"
-            )
+        verifier = self._get_verifier()
         output = Path(str(output_value))
         try:
-            result = self.verifier(output, state)
+            result = verifier(output, state)
         except Exception as exc:
             raise VerificationError(f"verification failed: {exc}") from exc
-        if result is False:
+        if result is False or (
+            isinstance(result, dict) and result.get("passed") is not True
+        ):
             raise VerificationError("verification reported failure")
-        verified = replace(state, phase="verified", updated_at=self._now())
+        artifacts = dict(state.artifacts)
+        if isinstance(result, dict):
+            for source, target in (
+                ("manifest_path", "verification_manifest_path"),
+                ("report_path", "verification_report_path"),
+                ("contact_sheet_path", "contact_sheet_path"),
+            ):
+                if result.get(source):
+                    artifacts[target] = str(result[source])
+        verified = replace(
+            state, phase="verified", updated_at=self._now(), artifacts=artifacts
+        )
         self.state_store.save(verified)
         return verified
 
-    def all(self, *, script_approval=None, approval_file=None):
+    def all(
+        self,
+        *,
+        script_approval=None,
+        estimate_approval=None,
+        approval_file=None,
+    ):
         if not self.state_store.path.is_file():
             state = self.plan()
         else:
             state = self.state_store.load()
+        if state.phase == "failed":
+            raise PipelineError("failed state requires an explicit recovery decision")
+        if state.phase in {"draft", "approved"}:
+            if script_approval is None and estimate_approval is None:
+                return state
+            if not script_approval or not estimate_approval:
+                raise ApprovalError(
+                    "all requires both --script-approval and --estimate-approval "
+                    "before paid narration"
+                )
+            state = self.narrate(script_approval, estimate_approval)
+        if state.phase == "narrated":
+            if approval_file is None:
+                return state
+            return self.submit(approval_file)
+
         checkpointed_job = any(
             state.artifacts.get(name) for name in ("task_id", "video_id", "job_id")
         )
         if (
             state.job_id is not None
             or checkpointed_job
-            or state.phase in {"submitting", "submission_unknown"}
+            or state.phase in {"submitting", "submission_unknown", "processing", "completed"}
         ):
-            return self.resume()
-        if state.phase in {"downloaded", "composed", "verified"}:
-            return state
-        if state.phase == "failed":
-            raise PipelineError("failed state requires an explicit recovery decision")
-        if state.phase in {"draft", "approved"}:
-            if approval_file is None:
+            state = self.resume()
+            if isinstance(state, AlternateProviderReport):
                 return state
-            if not script_approval:
-                raise ApprovalError(
-                    "all requires --script-approval before narration"
-                )
-            state = self.narrate(script_approval)
-        if state.phase != "narrated":
-            raise PipelineError(f"all cannot continue from phase {state.phase}")
-        if approval_file is None:
+            if state.phase in {"submitted", "processing", "completed"}:
+                return state
+        if state.phase == "downloaded":
+            state = self.compose()
+        if state.phase == "composed":
+            state = self.verify()
+        if state.phase == "verified":
             return state
-        return self.submit(approval_file)
+        raise PipelineError(f"all cannot continue from phase {state.phase}")

@@ -9,6 +9,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from dhsv.pipeline import Pipeline, PipelineError
+from dhsv.security import redact
 
 
 def build_parser():
@@ -23,6 +24,7 @@ def build_parser():
     narrate = commands.add_parser("narrate")
     narrate.add_argument("project")
     narrate.add_argument("--script-approval", required=True)
+    narrate.add_argument("--estimate-approval", required=True)
 
     submit = commands.add_parser("submit")
     submit.add_argument("project")
@@ -35,6 +37,7 @@ def build_parser():
     run_all = commands.add_parser("all")
     run_all.add_argument("project")
     run_all.add_argument("--script-approval")
+    run_all.add_argument("--estimate-approval")
     run_all.add_argument("--approval-file")
     return parser
 
@@ -56,7 +59,7 @@ def main(argv=None):
         if args.command == "plan":
             result = pipeline.plan()
         elif args.command == "narrate":
-            result = pipeline.narrate(args.script_approval)
+            result = pipeline.narrate(args.script_approval, args.estimate_approval)
         elif args.command == "submit":
             result = pipeline.submit(args.approval_file)
         elif args.command == "resume":
@@ -68,10 +71,11 @@ def main(argv=None):
         else:
             result = pipeline.all(
                 script_approval=args.script_approval,
+                estimate_approval=args.estimate_approval,
                 approval_file=args.approval_file,
             )
-    except (PipelineError, OSError, ValueError) as exc:
-        print(str(exc), file=sys.stderr)
+    except Exception as exc:
+        print(redact(str(exc)), file=sys.stderr)
         return 2
     print(json.dumps(result, default=_json_default, ensure_ascii=False, sort_keys=True))
     return 0

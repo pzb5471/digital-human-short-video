@@ -1,4 +1,5 @@
 import hashlib
+import json
 import subprocess
 import sys
 import tempfile
@@ -6,7 +7,13 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from dhsv.narration import NarrationError, NarrationPipeline, NarrationValidationError
+from dhsv.narration import (
+    NarrationError,
+    NarrationPipeline,
+    NarrationRevisionRequired,
+    NarrationSubmissionUnknownError,
+    NarrationValidationError,
+)
 from dhsv.media import FFmpegMedia
 from dhsv.script import Script, Segment, validate_script
 
@@ -18,13 +25,15 @@ def script():
     ]})
 
 class Client:
+    model = "cosyvoice-v3-flash"
+    voice = "longanyang"
     def __init__(self): self.calls=[]
-    def synthesize(self, text, **kwargs): self.calls.append((text, kwargs)); return type("R", (), {"audio": text.encode(), "words": [{"text": text}]})()
+    def synthesize(self, text, **kwargs): self.calls.append((text, kwargs)); return type("R", (), {"audio": text.encode(), "words": [{"text": text, "begin_time": 0, "end_time": 100}]})()
 
 class Media:
     def __init__(self): self.calls=[]
     def concat_and_normalize(self, inputs, output): self.calls.append(inputs); Path(output).write_bytes(b"narration")
-    def duration_ms(self, path): return 1000
+    def duration_ms(self, path): return 900 if Path(path).name == "narration.wav" else 400
 
 class NarrationTests(unittest.TestCase):
     def test_ffprobe_reports_real_synthetic_wav_duration(self):
@@ -63,9 +72,52 @@ class NarrationTests(unittest.TestCase):
         class PerSegmentMedia(Media):
             def duration_ms(self, path): return 1000 if Path(path).name == "hook.wav" else 400
         with tempfile.TemporaryDirectory() as directory:
-            NarrationPipeline(Client(), PerSegmentMedia(), Path(directory)).build(script())
+            with self.assertRaises(NarrationRevisionRequired):
+                NarrationPipeline(Client(), PerSegmentMedia(), Path(directory)).build(script())
             revision = __import__("json").loads((Path(directory) / "audio" / "revision_required.json").read_text())
             self.assertEqual(["hook"], revision["segment_ids"])
+
+    def test_real_word_timestamps_are_aggregated_with_segment_offsets_and_pauses(self):
+        class TimedMedia(Media):
+            def duration_ms(self, path):
+                name = Path(path).name
+                return 400 if name in {"hook.wav", "cta.wav"} else 900
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = NarrationPipeline(Client(), TimedMedia(), Path(directory)).build(script())
+            timestamps = json.loads(Path(result.timestamps_path).read_text(encoding="utf-8"))
+            first, second = timestamps["segments"]
+            self.assertEqual((0, 400), (first["start_ms"], first["end_ms"]))
+            self.assertEqual((500, 900), (second["start_ms"], second["end_ms"]))
+            self.assertEqual((0, 100), (first["words"][0]["start_ms"], first["words"][0]["end_ms"]))
+            self.assertEqual((500, 600), (second["words"][0]["start_ms"], second["words"][0]["end_ms"]))
+
+    def test_stale_paid_segment_intent_quarantines_without_second_call(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            intent = runtime / "audio" / "intents" / "hook.json"
+            intent.parent.mkdir(parents=True)
+            intent.write_text(json.dumps({"cache_key": "unknown"}), encoding="utf-8")
+            client = Client()
+            with self.assertRaises(NarrationSubmissionUnknownError):
+                NarrationPipeline(client, Media(), runtime).build(script())
+            self.assertEqual([], client.calls)
+
+    def test_client_crash_leaves_intent_and_second_run_does_not_recharge(self):
+        class CrashClient(Client):
+            def synthesize(self, text, **kwargs):
+                self.calls.append((text, kwargs))
+                raise TimeoutError("ambiguous paid request")
+
+        with tempfile.TemporaryDirectory() as directory:
+            client = CrashClient()
+            pipeline = NarrationPipeline(client, Media(), Path(directory))
+            with self.assertRaises(TimeoutError):
+                pipeline.build(script())
+            self.assertTrue((Path(directory) / "audio" / "intents" / "hook.json").is_file())
+            with self.assertRaises(NarrationSubmissionUnknownError):
+                pipeline.build(script())
+            self.assertEqual(1, len(client.calls))
 
     def test_merged_audio_over_58_seconds_fails_after_probe(self):
         class LongFinalMedia(Media):

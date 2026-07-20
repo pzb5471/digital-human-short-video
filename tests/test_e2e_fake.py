@@ -13,7 +13,6 @@ from dhsv.narration import NarrationResult
 from dhsv.pipeline import Pipeline
 from dhsv.providers.fake import FakeProvider
 from dhsv.state import StateStore
-from prepare_remotion import prepare_remotion
 
 try:
     from dhsv import verify as verify_module
@@ -86,66 +85,8 @@ class FakeEndToEndTests(unittest.TestCase):
                 relay.sink = checkpoint_sink
                 return provider
 
-            tracked_props = TEMPLATE / "src" / "fixture-props.json"
-            original_props = tracked_props.read_bytes()
             manifest_path = project_root / ".runtime" / "verification-manifest.json"
             report_dir = project_root / ".runtime" / "verification"
-
-            def render_composition(original, destination, state):
-                captions = json.loads(
-                    Path(state.artifacts["captions_json_path"]).read_text(
-                        encoding="utf-8"
-                    )
-                )
-                composition = {
-                    "provider_original": str(Path(original).relative_to(project_root)),
-                    "duration_ms": captions["duration_ms"],
-                    "captions": captions["cues"],
-                    "hook": "Hook line.",
-                    "cta": "Call now!!",
-                }
-                composition_path = project_root / "composition.json"
-                composition_path.write_text(json.dumps(composition), encoding="utf-8")
-                prepare_remotion(composition_path, TEMPLATE / "public" / "project")
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                subprocess.run(
-                    [
-                        str(TEMPLATE / "node_modules" / ".bin" / "remotion.cmd"),
-                        "render",
-                        "src/index.ts",
-                        "DigitalHumanShortVideo",
-                        str(destination),
-                        "--props=src/fixture-props.json",
-                        "--codec=h264",
-                        "--pixel-format=yuv420p",
-                        "--concurrency=2",
-                    ],
-                    cwd=TEMPLATE,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                return {
-                    "watermark_layers_omitted": True,
-                    "watermark_removal_postprocessing": False,
-                }
-
-            def composer(original, destination, state):
-                try:
-                    return render_composition(original, destination, state)
-                finally:
-                    tracked_props.write_bytes(original_props)
-
-            def verifier(output, state):
-                verify_module.write_verification_manifest(state, manifest_path)
-                report = verify_module.verify_video(
-                    output,
-                    state.artifacts["captions_json_path"],
-                    state.artifacts["narration_path"],
-                    manifest_path,
-                    report_dir,
-                )
-                return report["passed"]
 
             pipeline = Pipeline(
                 project_root / "project.json",
@@ -154,11 +95,11 @@ class FakeEndToEndTests(unittest.TestCase):
                     generated / "narration.wav", project_root / ".runtime"
                 ),
                 provider_factory=provider_factory,
-                composer=composer,
-                verifier=verifier,
             )
             planned = pipeline.plan()
-            narrated = pipeline.narrate(planned.script_sha256)
+            narrated = pipeline.narrate(
+                planned.script_sha256, planned.artifacts["estimate_sha256"]
+            )
             estimate = json.loads(
                 (project_root / ".runtime" / "estimate.json").read_text(
                     encoding="utf-8"
