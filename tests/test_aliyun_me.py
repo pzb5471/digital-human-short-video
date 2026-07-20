@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from alibabacloud_intelligentcreation20240313 import models as aliyun_models
@@ -21,6 +23,7 @@ def env(**changes):
         "ALIBABA_CLOUD_ACCESS_KEY_SECRET": "sk",
         "ALIYUN_OSS_ENDPOINT": "https://oss-cn-test.aliyuncs.com",
         "ALIYUN_OSS_BUCKET": "user-bucket",
+        "ALIYUN_ANCHOR_GENDER": "M",
     }
     values.update(changes)
     return values
@@ -118,6 +121,12 @@ class FakeDownloadSession:
         return FakeDownloadResponse()
 
 
+class FailingDownloadSession(FakeDownloadSession):
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        raise requests.ConnectionError(f"connection failed for {url}")
+
+
 class FakeBucket:
     def __init__(self, signed_url="https://bucket.example/object?Signature=secret"):
         self.signed_url = signed_url
@@ -209,6 +218,16 @@ class AliyunMEProviderTests(unittest.TestCase):
         self.assertFalse(issubclass(AliyunMEProvider, FakeProvider))
         self.assertFalse(AliyunMEProvider({}, watermark_free_confirmed=True).validate_credentials().available)
         self.assertFalse(AliyunMEProvider(env(), watermark_free_confirmed=False).validate_credentials().available)
+        self.assertFalse(
+            AliyunMEProvider(
+                env(ALIYUN_ANCHOR_GENDER=""), watermark_free_confirmed=True
+            ).validate_credentials().available
+        )
+        self.assertFalse(
+            AliyunMEProvider(
+                env(ALIYUN_ANCHOR_GENDER="unknown"), watermark_free_confirmed=True
+            ).validate_credentials().available
+        )
 
     def test_default_endpoint_is_passed_to_injected_official_client_factory(self):
         provider, _, captured = self.provider()
@@ -240,8 +259,17 @@ class AliyunMEProviderTests(unittest.TestCase):
             avatar = provider.create_or_reuse_avatar(self.request(directory), state())
         self.assertEqual("anchor-new", avatar.id)
         payload = client.create_requests[0].to_map()
-        self.assertEqual("https", payload["coverUrl"].split(":", 1)[0])
-        self.assertEqual("demo/random-portrait.png", payload["videoOssKey"])
+        self.assertEqual(
+            {
+                "anchorMaterialName": f"demo-{hashlib.sha256(b'portrait').hexdigest()[:12]}",
+                "coverUrl": "https://user-bucket.oss-cn-test.aliyuncs.com/demo/random-portrait.png?Signature=secret",
+                "digitalHumanType": "photoNonTransparentBg",
+                "gender": "M",
+                "useScene": "offlineSynthesis",
+            },
+            payload,
+        )
+        self.assertNotIn("videoOssKey", payload)
         self.assertEqual("anchor-new", mapping[hashlib.sha256(b"portrait").hexdigest()])
         self.assertEqual(
             {"object_key": "demo/random-portrait.png"},
@@ -293,8 +321,19 @@ class AliyunMEProviderTests(unittest.TestCase):
         self.assertEqual(0, payload["transparentBackground"])
         self.assertEqual(1, len(payload["frames"]))
         frame = payload["frames"][0]
+        self.assertEqual(1, frame["index"])
         self.assertEqual(
-            [{"index": 0, "material": {"id": "anchor-1"}, "type": "ANCHOR"}],
+            [
+                {
+                    "index": 1,
+                    "material": {"id": "anchor-1"},
+                    "positionX": 0,
+                    "positionY": 0,
+                    "width": 1080,
+                    "height": 1920,
+                    "type": "ANCHOR",
+                }
+            ],
             frame["layers"],
         )
         self.assertEqual("AUDIO", frame["videoScript"]["type"])
@@ -336,7 +375,10 @@ class AliyunMEProviderTests(unittest.TestCase):
 
     def test_status_poll_uses_get_project_task_and_completed_result_downloads(self):
         session = FakeDownloadSession()
-        provider, client, _ = self.provider(download_session=session)
+        provider, client, _ = self.provider(
+            client=FakeAliyunClient(statuses=[("IN_PROGRESS", None), ("SUCCESS", "https://download.example/result.mp4")]),
+            download_session=session,
+        )
         self.assertEqual("processing", provider.get_status("task-123").status)
         self.assertEqual("completed", provider.get_status("task-123").status)
         with tempfile.TemporaryDirectory() as directory:
@@ -349,6 +391,38 @@ class AliyunMEProviderTests(unittest.TestCase):
             [request.to_map() for request in client.get_requests],
         )
         self.assertEqual("https://download.example/result.mp4", session.calls[0][0])
+
+    def test_cancel_status_is_failed(self):
+        provider, _, _ = self.provider(
+            client=FakeAliyunClient(statuses=[("CANCEL", None)])
+        )
+        self.assertEqual("failed", provider.get_status("task-123").status)
+
+    def test_invalid_anchor_gender_fails_before_portrait_upload(self):
+        publisher = StubPublisher()
+        provider = AliyunMEProvider(
+            env(ALIYUN_ANCHOR_GENDER="unknown"),
+            watermark_free_confirmed=True,
+            asset_publisher=publisher,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(ProviderValidationError, "ALIYUN_ANCHOR_GENDER"):
+                provider.create_or_reuse_avatar(self.request(directory), state())
+        self.assertEqual([], publisher.calls)
+
+    def test_download_request_error_does_not_leak_signed_url(self):
+        secret_url = "https://download.example/result.mp4?Signature=secret-token"
+        session = FailingDownloadSession()
+        provider, _, _ = self.provider(
+            client=FakeAliyunClient(statuses=[("SUCCESS", secret_url)]),
+            download_session=session,
+        )
+        provider.get_status("task-123")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ProviderValidationError) as captured:
+                provider.download_result("task-123", Path(directory) / "video.mp4")
+        self.assertEqual("Aliyun result download failed", str(captured.exception))
+        self.assertNotIn("secret-token", str(captured.exception))
 
 
 if __name__ == "__main__":

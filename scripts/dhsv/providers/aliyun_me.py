@@ -27,6 +27,7 @@ REQUIRED_ENV = (
     "ALIBABA_CLOUD_ACCESS_KEY_SECRET",
     "ALIYUN_OSS_ENDPOINT",
     "ALIYUN_OSS_BUCKET",
+    "ALIYUN_ANCHOR_GENDER",
 )
 
 
@@ -38,11 +39,11 @@ def _normalize_status(value: str) -> str:
     normalized = str(value or "").strip().upper()
     if normalized in {"CREATED", "PENDING", "WAITING", "QUEUED", "QUEUEING"}:
         return "queued"
-    if normalized in {"RUNNING", "PROCESSING"}:
+    if normalized in {"RUNNING", "PROCESSING", "IN_PROGRESS"}:
         return "processing"
     if normalized in {"SUCCESS", "SUCCEEDED", "COMPLETED", "FINISHED"}:
         return "completed"
-    if normalized in {"FAIL", "FAILED", "ERROR"}:
+    if normalized in {"FAIL", "FAILED", "ERROR", "CANCEL", "CANCELED", "CANCELLED"}:
         return "failed"
     raise ProviderValidationError(f"unknown Aliyun task status: {normalized or 'missing'}")
 
@@ -88,6 +89,8 @@ class AliyunMEProvider:
         missing = [name for name in REQUIRED_ENV if not self.env.get(name)]
         if missing:
             return CapabilityReport(False, "missing Aliyun credentials or OSS configuration")
+        if str(self.env["ALIYUN_ANCHOR_GENDER"]).strip().upper() not in {"M", "F"}:
+            return CapabilityReport(False, "ALIYUN_ANCHOR_GENDER must be M or F")
         if not self.watermark_free_confirmed:
             return CapabilityReport(False, "watermark-free capability unconfirmed")
         return CapabilityReport(True)
@@ -144,7 +147,9 @@ class AliyunMEProvider:
             {
                 "anchorMaterialName": f"{request.project_id}-{portrait_hash[:12]}",
                 "coverUrl": portrait.signed_url,
-                "videoOssKey": portrait.object_key,
+                "gender": str(self.env["ALIYUN_ANCHOR_GENDER"]).strip().upper(),
+                "useScene": "offlineSynthesis",
+                "digitalHumanType": "photoNonTransparentBg",
             }
         )
         response = self._client().create_anchor(create_request)
@@ -191,11 +196,15 @@ class AliyunMEProvider:
             "transparentBackground": 0,
             "frames": [
                 {
-                    "index": 0,
+                    "index": 1,
                     "layers": [
                         {
-                            "index": 0,
+                            "index": 1,
                             "type": "ANCHOR",
+                            "positionX": 0,
+                            "positionY": 0,
+                            "width": 1080,
+                            "height": 1920,
                             "material": {"id": avatar.id},
                         }
                     ],
@@ -232,7 +241,10 @@ class AliyunMEProvider:
             if self.get_status(job_id).status != "completed":
                 raise ProviderValidationError("Aliyun task is not completed")
         url = self._result_urls[job_id]
-        response = self.download_session.get(url, timeout=(10, 120))
+        try:
+            response = self.download_session.get(url, timeout=(10, 120))
+        except requests.RequestException:
+            raise ProviderValidationError("Aliyun result download failed") from None
         if getattr(response, "status_code", 500) >= 400:
             raise ProviderValidationError(
                 f"Aliyun result download failed: {response.status_code}"

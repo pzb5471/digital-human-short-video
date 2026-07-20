@@ -147,6 +147,7 @@ class ProviderContractTests(unittest.TestCase):
                 "ALIBABA_CLOUD_ACCESS_KEY_SECRET": "sk",
                 "ALIYUN_OSS_ENDPOINT": "https://oss-cn-test.aliyuncs.com",
                 "ALIYUN_OSS_BUCKET": "user-bucket",
+                "ALIYUN_ANCHOR_GENDER": "M",
             },
             watermark_free_confirmed=True,
             client_factory=lambda config: aliyun_client,

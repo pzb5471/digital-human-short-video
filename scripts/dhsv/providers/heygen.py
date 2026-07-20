@@ -161,30 +161,23 @@ class HeyGenProvider:
             self._avatar_modes[cached] = "avatar"
             self._checkpoints.record(avatar_id=cached)
             return AvatarRef(cached)
+        image_fallback = (
+            str(self.env.get("HEYGEN_IMAGE_FALLBACK", "")).strip().lower() == "true"
+        )
+        if not image_fallback:
+            raise ProviderValidationError(
+                "set HEYGEN_AVATAR_ID or explicitly set HEYGEN_IMAGE_FALLBACK=true "
+                "before uploading a new portrait"
+            )
         portrait_asset_id = self._upload_asset(
             request.portrait_path,
             f"portrait:{request.project_id}:{portrait_hash}",
             "portrait",
         )
         self._checkpoints.record(portrait_asset_id=portrait_asset_id)
-        image_fallback = (
-            str(self.env.get("HEYGEN_IMAGE_FALLBACK", "")).strip().lower() == "true"
-        )
-        if image_fallback:
-            self._avatar_modes[portrait_asset_id] = "image"
-            self._checkpoints.record(avatar_mode="image")
-            return AvatarRef(portrait_asset_id)
-        data = self._post(
-            "/v3/photo_avatars",
-            idempotency_key=f"avatar:{request.project_id}:{portrait_hash}",
-            operation="photo avatar creation",
-            json={"asset_id": portrait_asset_id, "name": request.title},
-        )
-        avatar_id = _identifier(data, "id", "avatar_id")
-        self.avatar_cache[portrait_hash] = avatar_id
-        self._avatar_modes[avatar_id] = "avatar"
-        self._checkpoints.record(avatar_id=avatar_id)
-        return AvatarRef(avatar_id)
+        self._avatar_modes[portrait_asset_id] = "image"
+        self._checkpoints.record(avatar_mode="image")
+        return AvatarRef(portrait_asset_id)
 
     def submit_video(self, request, avatar, idempotency_key):
         if idempotency_key in self._submitted:
@@ -242,7 +235,10 @@ class HeyGenProvider:
         if job_id not in self._result_urls:
             if self.get_status(job_id).status != "completed":
                 raise ProviderValidationError("HeyGen video is not completed")
-        response = self.session.get(self._result_urls[job_id], timeout=(10, 120))
+        try:
+            response = self.session.get(self._result_urls[job_id], timeout=(10, 120))
+        except requests.RequestException:
+            raise ProviderValidationError("HeyGen result download failed") from None
         if getattr(response, "status_code", 500) >= 400:
             raise ProviderValidationError(
                 f"HeyGen result download failed: HTTP {response.status_code}"

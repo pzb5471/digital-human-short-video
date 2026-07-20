@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import requests
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from dhsv.models import JobState
@@ -64,6 +66,14 @@ class FakeSession:
         return self.get_responses.pop(0)
 
 
+class FailingDownloadSession(FakeSession):
+    def get(self, url, **kwargs):
+        self.calls.append(("GET", url, dict(kwargs)))
+        if url.startswith("https://cdn.example/"):
+            raise requests.ConnectionError(f"connection failed for {url}")
+        return super().get(url, **kwargs)
+
+
 def response(identifier):
     return FakeResponse({"data": {"id": identifier, "created_at": "now"}})
 
@@ -101,31 +111,32 @@ class HeyGenProviderTests(unittest.TestCase):
         self.assertEqual([], session.calls)
         self.assertEqual("avatar-cached", provider.state_artifacts["avatar_id"])
 
-    def test_portrait_multipart_then_photo_avatar_mutation_are_idempotent_and_persist_ids(self):
-        session = FakeSession(posts=[response("portrait-asset"), response("avatar-new")])
+    def test_missing_avatar_without_explicit_image_fallback_fails_before_portrait_upload(self):
+        session = FakeSession()
         provider = HeyGenProvider(
             env(), watermark_free_confirmed=True, session=session, avatar_cache={}
         )
         with tempfile.TemporaryDirectory() as directory:
             request = self.request(directory)
-            first = provider.create_or_reuse_avatar(request, state())
-            second = provider.create_or_reuse_avatar(request, state())
-        self.assertEqual(first, second)
-        self.assertEqual("avatar-new", first.id)
-        self.assertEqual(
-            ["https://api.heygen.com/v3/assets", "https://api.heygen.com/v3/photo_avatars"],
-            [call[1] for call in session.calls],
+            with self.assertRaisesRegex(
+                ProviderValidationError, "HEYGEN_AVATAR_ID.*HEYGEN_IMAGE_FALLBACK=true"
+            ):
+                provider.create_or_reuse_avatar(request, state())
+        self.assertEqual([], session.calls)
+
+    def test_cached_portrait_avatar_is_reused_without_http_mutation(self):
+        session = FakeSession()
+        portrait_hash = hashlib.sha256(b"portrait").hexdigest()
+        provider = HeyGenProvider(
+            env(),
+            watermark_free_confirmed=True,
+            session=session,
+            avatar_cache={portrait_hash: "avatar-cached-by-hash"},
         )
-        asset_call, avatar_call = session.calls
-        self.assertEqual(b"portrait", asset_call[2]["files"]["file"]["content"])
-        self.assertEqual("portrait.png", asset_call[2]["files"]["file"]["filename"])
-        self.assertEqual(
-            {"asset_id": "portrait-asset", "name": "Demo title"}, avatar_call[2]["json"]
-        )
-        for _, _, call in session.calls:
-            self.assertTrue(call["headers"]["Idempotency-Key"])
-        self.assertEqual("portrait-asset", provider.state_artifacts["portrait_asset_id"])
-        self.assertEqual("avatar-new", provider.state_artifacts["avatar_id"])
+        with tempfile.TemporaryDirectory() as directory:
+            avatar = provider.create_or_reuse_avatar(self.request(directory), state())
+        self.assertEqual("avatar-cached-by-hash", avatar.id)
+        self.assertEqual([], session.calls)
 
     def test_explicit_image_fallback_uses_image_asset_in_video_payload(self):
         session = FakeSession(
@@ -149,19 +160,16 @@ class HeyGenProviderTests(unittest.TestCase):
     def test_only_explicit_true_enables_image_fallback(self):
         for value in ("", "false", "1", "yes", "on"):
             with self.subTest(value=value):
-                session = FakeSession(
-                    posts=[response("portrait-asset"), response("avatar-new")]
-                )
+                session = FakeSession()
                 provider = HeyGenProvider(
                     env(HEYGEN_IMAGE_FALLBACK=value),
                     watermark_free_confirmed=True,
                     session=session,
                 )
                 with tempfile.TemporaryDirectory() as directory:
-                    avatar = provider.create_or_reuse_avatar(
-                        self.request(directory), state()
-                    )
-                self.assertEqual("avatar-new", avatar.id)
+                    with self.assertRaises(ProviderValidationError):
+                        provider.create_or_reuse_avatar(self.request(directory), state())
+                self.assertEqual([], session.calls)
 
     def test_audio_multipart_and_video_payload_are_exact_for_avatar_mode(self):
         session = FakeSession(posts=[response("audio-asset"), response("video-1")])
@@ -291,6 +299,19 @@ class HeyGenProviderTests(unittest.TestCase):
         self.assertTrue(all(call[0] == "GET" for call in session.calls))
         self.assertNotIn("video_url", provider.state_artifacts)
         self.assertNotIn("token=secret", repr(provider.state_artifacts))
+
+    def test_download_request_error_does_not_leak_signed_url(self):
+        secret_url = "https://cdn.example/video.mp4?token=secret-token"
+        session = FailingDownloadSession(
+            gets=[FakeResponse({"data": {"status": "completed", "video_url": secret_url}})]
+        )
+        provider = HeyGenProvider(env(), watermark_free_confirmed=True, session=session)
+        provider.get_status("video-1")
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(ProviderValidationError) as captured:
+                provider.download_result("video-1", Path(directory) / "video.mp4")
+        self.assertEqual("HeyGen result download failed", str(captured.exception))
+        self.assertNotIn("secret-token", str(captured.exception))
 
 
 if __name__ == "__main__":
