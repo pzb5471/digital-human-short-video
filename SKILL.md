@@ -7,6 +7,10 @@ description: Use when a user asks to turn an authorized portrait photo and a top
 
 Create a 9:16 talking-head video through explicit approval gates. Preserve the paid provider original, drive every provider from one narration WAV, and resume persisted jobs without duplicate submission.
 
+Before answering, cover every applicable workflow contract explicitly. For a new-video plan, name authorization and script approval, itemize digital-human and TTS estimates, require the exact paid approval before mutation, state that the same narration drives provider lip-sync and caption timing, check account-side watermark-free eligibility, and describe final media verification. For a paid-job recovery, explicitly read `state.json`, reuse only its original job ID, prohibit automatic resubmission, re-query that same job when a signed result URL expires, and preserve `.runtime/provider-original.mp4`. For script/audio/caption design, explicitly provide structured `script.json`, segmented TTS, word timestamps, the `narration.wav` SHA-256, identical audio submission to both providers, the 12–16-cell wrapping rule, and the 58-second hard cap.
+
+Use only field, command, and environment-variable names defined below or in the conditionally loaded references. Never invent aliases. When a response shows credential setup, load `references/provider-setup.md` and copy names from the matching `config/*.env.example` file.
+
 ## 1. Confirm preconditions
 
 1. Obtain explicit authorization for the portrait, voice, product assets, logo, music, fonts, and claims.
@@ -37,6 +41,31 @@ Use `provider: aliyun-me` for the safe default. Never create or recommend a proj
 ## 3. Generate and approve the script
 
 Create `script.json` with unique segment IDs, non-empty `spoken_text` and `subtitle_text`, pauses from 0–2000 ms, `hook` first, and `cta` last. Structure the message as a 3-second hook, pain point, solution/evidence, and CTA. Use only supplied evidence; mark unresolved claims for the user.
+
+Use this exact segment schema; do not substitute `text`, `pause_ms`, or prose-only tables:
+
+```json
+{
+  "segments": [
+    {
+      "id": "hook",
+      "role": "hook",
+      "spoken_text": "A supplied, verifiable hook",
+      "subtitle_text": "A supplied, verifiable hook",
+      "pause_after_ms": 300,
+      "keywords": ["hook keyword"]
+    },
+    {
+      "id": "cta",
+      "role": "cta",
+      "spoken_text": "An approved call to action",
+      "subtitle_text": "An approved call to action",
+      "pause_after_ms": 0,
+      "keywords": ["call to action"]
+    }
+  ]
+}
+```
 
 Show the complete script and initial duration estimate. Run `plan`, then ask the user to approve the exact SHA-256 printed in state. Continue to `narrate` only with that exact hash.
 
