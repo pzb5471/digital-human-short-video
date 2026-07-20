@@ -96,7 +96,9 @@ def build_captions(script: Script, timestamps: dict) -> dict:
             raise CaptionValidationError("segment timestamps must be monotonic")
         keyword_spans = _keyword_spans(segment.spoken_text, segment.keywords)
         supplied = stream.get("words")
-        if supplied:
+        if segment.subtitle_text != segment.spoken_text:
+            words = []
+        elif supplied:
             words = []
             previous = start
             supplied_text = [str(word["text"]) for word in supplied]
@@ -112,7 +114,8 @@ def build_captions(script: Script, timestamps: dict) -> dict:
             words = _fallback_words(segment.spoken_text, start, end, keyword_spans)
         cues.append({"id": f"{segment.role}-{index:03d}", "start_ms": start, "end_ms": end, "lines": wrap_caption_lines(segment.subtitle_text), "words": words})
         offset = end + segment.pause_after_ms
-    duration = max((cue["end_ms"] for cue in cues), default=0)
+    cue_duration = max((cue["end_ms"] for cue in cues), default=0)
+    duration = max(cue_duration, int(timestamps.get("duration_ms", 0) or 0))
     return {"version": 1, "duration_ms": duration, "cues": cues}
 
 

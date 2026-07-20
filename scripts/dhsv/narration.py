@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .locking import exclusive_process_lock
-from .script import estimate_duration_ms
+from .script import estimate_duration_ms, estimate_segment_duration_ms
 
 
 class NarrationValidationError(ValueError):
@@ -151,7 +151,7 @@ class NarrationPipeline:
         for segment in script.segments:
             segment_path = segments_dir / f"{segment.id}.wav"
             duration = self.media.duration_ms(segment_path)
-            expected = max(1, len(segment.spoken_text)) * 200
+            expected = estimate_segment_duration_ms(segment.spoken_text)
             if abs(duration - expected) / expected > 0.08:
                 affected.append(segment.id)
             raw_words = json.loads(
@@ -167,7 +167,10 @@ class NarrationPipeline:
             )
             offset += duration + segment.pause_after_ms
         timestamps_path = audio_dir / "timestamps.json"
-        _atomic_json(timestamps_path, {"segments": timestamp_segments})
+        _atomic_json(
+            timestamps_path,
+            {"duration_ms": actual, "segments": timestamp_segments},
+        )
 
         digest = hashlib.sha256(output.read_bytes()).hexdigest()
         hash_path = audio_dir / "narration.wav.sha256"

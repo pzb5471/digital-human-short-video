@@ -86,8 +86,19 @@ class CosyVoiceClient:
             sentence = output.get("sentence") or {}
             words.extend(sentence.get("words") or [])
         if not chunks and audio_url:
-            if urlparse(audio_url).scheme != "https":
-                raise RuntimeError("CosyVoice returned a non-HTTPS audio URL")
+            parsed_audio_url = urlparse(audio_url)
+            official_http = (
+                parsed_audio_url.scheme == "http"
+                and str(parsed_audio_url.hostname or "").lower().endswith(
+                    ".aliyuncs.com"
+                )
+            )
+            if (
+                not parsed_audio_url.netloc
+                or parsed_audio_url.scheme not in {"http", "https"}
+                or (parsed_audio_url.scheme == "http" and not official_http)
+            ):
+                raise RuntimeError("CosyVoice returned an untrusted audio URL")
             try:
                 download = request_with_retry(
                     self.session, "get", audio_url, timeout=(10, 120)

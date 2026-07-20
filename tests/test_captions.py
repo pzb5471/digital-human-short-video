@@ -6,7 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from dhsv.captions import CaptionValidationError, build_captions, render_ass, render_srt, wrap_caption_lines
-from dhsv.script import load_script
+from dhsv.script import load_script, validate_script
 
 
 class CaptionContractTests(unittest.TestCase):
@@ -74,3 +74,58 @@ class CaptionContractTests(unittest.TestCase):
         ass = render_ass({"version": 1, "duration_ms": 1000, "cues": [{"id": "x", "start_ms": 0, "end_ms": 1000, "lines": ["a{b}"], "words": []}]})
         self.assertIn("MarginV=180", ass)
         self.assertIn(r"a\{b\}", ass)
+
+    def test_explicit_timeline_duration_preserves_trailing_narration_pause(self):
+        timestamps = {
+            "duration_ms": 2700,
+            "segments": [
+                {"id": "hook", "start_ms": 0, "end_ms": 1300},
+                {"id": "cta", "start_ms": 1600, "end_ms": 2400},
+            ],
+        }
+        captions = build_captions(self.script, timestamps)
+        self.assertEqual(2700, captions["duration_ms"])
+        self.assertEqual(2400, captions["cues"][-1]["end_ms"])
+
+    def test_different_subtitle_text_disables_spoken_word_rendering(self):
+        script = validate_script(
+            {
+                "segments": [
+                    {
+                        "id": "hook",
+                        "role": "hook",
+                        "spoken_text": "Say every spoken word",
+                        "subtitle_text": "Short subtitle",
+                        "pause_after_ms": 0,
+                        "keywords": ["spoken"],
+                    },
+                    {
+                        "id": "cta",
+                        "role": "cta",
+                        "spoken_text": "Call now",
+                        "subtitle_text": "Call now",
+                        "pause_after_ms": 0,
+                        "keywords": ["Call"],
+                    },
+                ]
+            }
+        )
+        timestamps = {
+            "segments": [
+                {
+                    "id": "hook",
+                    "start_ms": 0,
+                    "end_ms": 1000,
+                    "words": [
+                        {"text": "Say", "start_ms": 0, "end_ms": 200},
+                        {"text": "every", "start_ms": 200, "end_ms": 400},
+                        {"text": "spoken", "start_ms": 400, "end_ms": 700},
+                        {"text": "word", "start_ms": 700, "end_ms": 1000},
+                    ],
+                },
+                {"id": "cta", "start_ms": 1000, "end_ms": 1800},
+            ]
+        }
+        hook = build_captions(script, timestamps)["cues"][0]
+        self.assertEqual(["Shortsubtitle"], hook["lines"])
+        self.assertEqual([], hook["words"])

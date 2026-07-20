@@ -23,14 +23,17 @@ class Script:
     segments: tuple[Segment, ...]
 
 
-def _spoken_duration_ms(text: str) -> int:
+def estimate_segment_duration_ms(text: str) -> int:
     # Conservative initial estimate: five visible CJK characters per second.
     visible = len(re.sub(r"\s+", "", text))
     return max(1, visible) * 200
 
 
 def estimate_duration_ms(script: Script) -> int:
-    return sum(_spoken_duration_ms(segment.spoken_text) + segment.pause_after_ms for segment in script.segments)
+    return sum(
+        estimate_segment_duration_ms(segment.spoken_text) + segment.pause_after_ms
+        for segment in script.segments
+    )
 
 
 def validate_script(document: dict) -> Script:

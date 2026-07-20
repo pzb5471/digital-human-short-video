@@ -98,6 +98,29 @@ class CosyVoiceTests(unittest.TestCase):
         self.assertEqual(b"wav", result.audio)
         self.assertEqual(1, len(session.get_calls))
 
+    def test_official_aliyuncs_http_audio_url_is_accepted(self):
+        class UrlResponse:
+            status_code = 200
+
+            def iter_lines(self):
+                yield b'data: {"output":{"audio":{"url":"http://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/result.wav"}}}'
+
+        class UrlSession:
+            def __init__(self):
+                self.get_calls = []
+
+            def post(self, url, **kwargs):
+                return UrlResponse()
+
+            def get(self, url, **kwargs):
+                self.get_calls.append(url)
+                return type("Download", (), {"status_code": 200, "content": b"wav"})()
+
+        session = UrlSession()
+        result = CosyVoiceClient("workspace", "secret", session=session).synthesize("x")
+        self.assertEqual(b"wav", result.audio)
+        self.assertEqual(1, len(session.get_calls))
+
 
 if __name__ == "__main__":
     unittest.main()

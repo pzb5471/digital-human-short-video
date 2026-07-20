@@ -94,6 +94,39 @@ class NarrationTests(unittest.TestCase):
             self.assertEqual((500, 900), (second["start_ms"], second["end_ms"]))
             self.assertEqual((0, 100), (first["words"][0]["start_ms"], first["words"][0]["end_ms"]))
             self.assertEqual((500, 600), (second["words"][0]["start_ms"], second["words"][0]["end_ms"]))
+            self.assertEqual(900, timestamps["duration_ms"])
+
+    def test_segment_drift_uses_same_whitespace_rule_as_script_estimate(self):
+        spaced = validate_script(
+            {
+                "segments": [
+                    {
+                        "id": "hook",
+                        "role": "hook",
+                        "spoken_text": "A B",
+                        "subtitle_text": "A B",
+                        "pause_after_ms": 0,
+                        "keywords": [],
+                    },
+                    {
+                        "id": "cta",
+                        "role": "cta",
+                        "spoken_text": "C D",
+                        "subtitle_text": "C D",
+                        "pause_after_ms": 0,
+                        "keywords": [],
+                    },
+                ]
+            }
+        )
+
+        class SpacedMedia(Media):
+            def duration_ms(self, path):
+                return 800 if Path(path).name == "narration.wav" else 400
+
+        with tempfile.TemporaryDirectory() as directory:
+            result = NarrationPipeline(Client(), SpacedMedia(), Path(directory)).build(spaced)
+            self.assertTrue(Path(result.narration_path).is_file())
 
     def test_stale_paid_segment_intent_quarantines_without_second_call(self):
         with tempfile.TemporaryDirectory() as directory:
