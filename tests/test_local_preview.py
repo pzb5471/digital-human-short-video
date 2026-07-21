@@ -1,4 +1,5 @@
 import sys
+import subprocess
 from pathlib import Path
 
 
@@ -8,10 +9,12 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from dhsv.local_preview import (
     SHOWCASE_SEGMENTS,
     WindowsSpeechSynthesizer,
+    build_local_preview,
     build_portrait_video_command,
     build_segment_timeline,
     preview_metadata,
 )
+from make_local_portrait_preview import main as preview_main
 
 
 def test_windows_speech_uses_local_powershell_and_writes_utf8_text(
@@ -80,3 +83,98 @@ def test_portrait_video_command_is_vertical_and_offline(tmp_path: Path) -> None:
     assert "libx264" in command
     assert "aac" in command
     assert not any(value.startswith(("http://", "https://")) for value in command)
+
+
+class FixtureSpeechSynthesizer:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def synthesize(self, text: str, output: Path, *, voice: str) -> Path:
+        assert text
+        assert voice == "fixture"
+        duration = (1.4, 2.6)[self.calls]
+        self.calls += 1
+        output.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency=440:sample_rate=24000:duration={duration}",
+                "-ac",
+                "1",
+                str(output),
+            ],
+            check=True,
+        )
+        return output
+
+
+def make_test_portrait(output: Path) -> Path:
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x8357a8:s=720x1280",
+            "-frames:v",
+            "1",
+            str(output),
+        ],
+        check=True,
+    )
+    return output
+
+
+def test_build_local_preview_creates_verified_artifacts(tmp_path: Path) -> None:
+    image = make_test_portrait(tmp_path / "portrait.jpg")
+
+    result = build_local_preview(
+        source_image=image,
+        output_dir=tmp_path / "preview",
+        synthesizer=FixtureSpeechSynthesizer(),
+        voice="fixture",
+    )
+
+    assert result["paid_api_calls"] == 0
+    assert result["real_lip_sync"] is False
+    assert result["verification_passed"] is True
+    for name in (
+        "portrait.jpg",
+        "narration.wav",
+        "captions.json",
+        "captions.srt",
+        "captions.ass",
+        "provider-original.mp4",
+        "final.mp4",
+        "cover.png",
+        "verification-report.json",
+        "preview-result.json",
+    ):
+        assert (tmp_path / "preview" / name).is_file(), name
+
+
+def test_cli_returns_two_for_missing_portrait(tmp_path: Path, capsys: object) -> None:
+    exit_code = preview_main(
+        [
+            "--image",
+            str(tmp_path / "missing.jpg"),
+            "--out",
+            str(tmp_path / "preview"),
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert "人像图片不存在" in captured.err
+    assert captured.out == ""
