@@ -43,6 +43,18 @@ python scripts/run_pipeline.py verify <项目目录>\project.json
 
 也可以用 `all` 作为可恢复调度器；它不会绕过脚本、费用或数字人付费审批。
 
+## 本地零付费 Showcase 预览
+
+Windows 用户可以使用系统自带的 `Microsoft Huihui Desktop` 中文语音，配合 FFmpeg 和 Remotion 在本地生成不调用任何付费 API 的竖屏预览：
+
+```powershell
+python scripts/make_local_portrait_preview.py --image "D:\素材\已授权头像.jpg"
+```
+
+输出默认位于 `.runtime/local-preview/`，包括成片 `final.mp4`、封面 `cover.png`、旁白、JSON/SRT/ASS 字幕和验证报告。该模式用于零成本演示完整合成流程，画面采用静态人像轻微推近，不包含真实口型驱动；生产模式仍可按项目配置接入阿里云百炼完成文案与 CosyVoice 配音，并接入数字人视频 API。
+
+本项目以阿里云百炼作为生产级口播文案与 CosyVoice 配音能力来源，并在本地完成字幕、竖屏包装和成片验证。
+
 ## 技能使用
 
 完整工作流、脚本 JSON 契约、审批哈希、恢复规则和产物说明见 [SKILL.md](SKILL.md)。供应商配置见 [provider-setup.md](references/provider-setup.md)，故障恢复见 [troubleshooting.md](references/troubleshooting.md)。
