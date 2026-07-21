@@ -12,6 +12,85 @@ class LocalPreviewError(RuntimeError):
 Runner = Callable[..., object]
 
 
+SHOWCASE_SEGMENTS = [
+    {
+        "segment_id": "segment-001",
+        "text": "这是一个数字人口播短视频测试。",
+    },
+    {
+        "segment_id": "segment-002",
+        "text": "项目将授权人像、口播音频和同步字幕自动合成为竖屏视频。",
+    },
+]
+
+
+def build_segment_timeline(
+    durations_ms: list[int], *, pause_ms: int
+) -> list[dict[str, int]]:
+    if len(durations_ms) != len(SHOWCASE_SEGMENTS):
+        raise LocalPreviewError("音频段数与脚本段数不一致")
+    cursor = 0
+    timeline: list[dict[str, int]] = []
+    for index, duration_ms in enumerate(durations_ms):
+        if duration_ms <= 0:
+            raise LocalPreviewError("音频时长必须大于零")
+        timeline.append({"start_ms": cursor, "end_ms": cursor + duration_ms})
+        cursor += duration_ms
+        if index < len(durations_ms) - 1:
+            cursor += pause_ms
+    return timeline
+
+
+def preview_metadata() -> dict[str, object]:
+    return {
+        "mode": "local-offline-preview",
+        "paid_api_calls": 0,
+        "watermark": False,
+        "real_lip_sync": False,
+        "speech_provider": "Windows System.Speech",
+    }
+
+
+def build_portrait_video_command(
+    *, image: Path, narration: Path, output: Path
+) -> list[str]:
+    video_filter = (
+        "scale=1080:1920:force_original_aspect_ratio=increase,"
+        "crop=1080:1920,"
+        "zoompan=z='min(zoom+0.00012,1.035)':"
+        "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+        "d=1:s=1080x1920:fps=30,format=yuv420p"
+    )
+    return [
+        "ffmpeg",
+        "-y",
+        "-loop",
+        "1",
+        "-i",
+        str(Path(image).resolve()),
+        "-i",
+        str(Path(narration).resolve()),
+        "-vf",
+        video_filter,
+        "-shortest",
+        "-r",
+        "30",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "128k",
+        "-movflags",
+        "+faststart",
+        str(Path(output).resolve()),
+    ]
+
+
 class WindowsSpeechSynthesizer:
     def __init__(self, script: Path, runner: Runner = subprocess.run) -> None:
         self.script = Path(script).resolve()
