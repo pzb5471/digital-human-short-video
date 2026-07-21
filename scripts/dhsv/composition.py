@@ -47,6 +47,10 @@ class RemotionComposer:
             ),
             "",
         )
+        if isinstance(project.get("hook"), str):
+            hook = project["hook"]
+        if isinstance(project.get("cta"), str):
+            cta = project["cta"]
         document = {
             "provider_original": str(Path(original).resolve().relative_to(self.project_root)),
             "duration_ms": captions["duration_ms"],
@@ -94,6 +98,8 @@ class RemotionComposer:
                 cwd=self.template_dir,
                 check=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 capture_output=True,
             )
         finally:

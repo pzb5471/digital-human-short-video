@@ -1,3 +1,4 @@
+import json
 import sys
 import subprocess
 from pathlib import Path
@@ -105,7 +106,19 @@ class FixtureSpeechSynthesizer:
                 "-f",
                 "lavfi",
                 "-i",
+                "anullsrc=r=24000:cl=mono:d=0.12",
+                "-f",
+                "lavfi",
+                "-i",
                 f"sine=frequency=440:sample_rate=24000:duration={duration}",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=r=24000:cl=mono:d=0.82",
+                "-filter_complex",
+                "[0:a][1:a][2:a]concat=n=3:v=0:a=1[a]",
+                "-map",
+                "[a]",
                 "-ac",
                 "1",
                 str(output),
@@ -149,6 +162,11 @@ def test_build_local_preview_creates_verified_artifacts(tmp_path: Path) -> None:
     assert result["paid_api_calls"] == 0
     assert result["real_lip_sync"] is False
     assert result["verification_passed"] is True
+    project = json.loads(
+        (tmp_path / "preview" / "project.json").read_text(encoding="utf-8")
+    )
+    assert project["hook"] == "10 秒看懂数字人口播"
+    assert project["cta"] == "授权素材 · 本地自动成片"
     for name in (
         "portrait.jpg",
         "narration.wav",

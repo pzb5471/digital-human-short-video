@@ -188,6 +188,31 @@ def _run_media(command: list[str]) -> None:
         raise LocalPreviewError(f"本地媒体处理失败：{detail}") from exc
 
 
+def _trim_segment_silence(source: Path, destination: Path) -> None:
+    trim_start = (
+        "silenceremove=start_periods=1:start_duration=0.05:"
+        "start_threshold=-45dB"
+    )
+    _run_media(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-i",
+            str(source),
+            "-af",
+            f"{trim_start},areverse,{trim_start},areverse",
+            "-ar",
+            "24000",
+            "-ac",
+            "1",
+            str(destination),
+        ]
+    )
+
+
 def build_local_preview(
     *,
     source_image: Path,
@@ -212,7 +237,10 @@ def build_local_preview(
     try:
         for item in SHOWCASE_SEGMENTS:
             segment_path = output_dir / f"{item['segment_id']}.wav"
-            synthesizer.synthesize(str(item["text"]), segment_path, voice=voice)
+            raw_segment = output_dir / f"{item['segment_id']}.raw.wav"
+            synthesizer.synthesize(str(item["text"]), raw_segment, voice=voice)
+            _trim_segment_silence(raw_segment, segment_path)
+            raw_segment.unlink(missing_ok=True)
             segment_paths.append(segment_path)
 
         durations_ms = [media.duration_ms(path) for path in segment_paths]
@@ -262,6 +290,8 @@ def build_local_preview(
         project_document = {
             "project_id": "local-cartoon-preview",
             "title": "数字人口播短视频测试",
+            "hook": "10 秒看懂数字人口播",
+            "cta": "授权素材 · 本地自动成片",
             "rights_confirmed": True,
             "portrait": portrait.name,
             "duration_seconds": round(narration_duration_ms / 1000, 3),
